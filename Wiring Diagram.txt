@@ -1,0 +1,259 @@
+# Greenhouse Controller - Complete Wiring Diagram
+
+## Power Distribution
+
+```
+5V 2A PSU
+├─ (+5V) ──┬─→ ESP32 VIN (or 5V pin)
+│          ├─→ TFT VCC
+│          ├─→ 5V Relay Coil (via transistor)
+│          ├─→ 5V DC Fan (via transistor)
+│          └─→ DS18B20 VCC (all 6 sensors)
+│
+└─ (GND) ──┴─→ Common Ground for all components
+```
+
+**IMPORTANT:** Connect ALL grounds together: PSU GND, ESP32 GND, TFT GND, sensors GND, transistor emitters, relay coil, fan negative.
+
+---
+
+## DS18B20 Temperature Sensors (TWO SEPARATE BUSES)
+
+### Air Sensors Bus (5 sensors on GPIO4)
+```
+Each of 5 Air Sensors:
+├─ VCC (red) ────→ 3.3V or 5V from PSU
+├─ GND (black) ──→ Common Ground
+└─ DATA (yellow) ┬→ ESP32 GPIO4
+                 │
+All 5 DATA lines ┴→ Connect together to GPIO4
+
+Pullup Resistor #1:
+4.7kΩ between GPIO4 and 3.3V
+```
+
+### Heater Sensor Bus (1 sensor on GPIO15) - SAFETY CRITICAL
+```
+Heater Sensor (near heater element):
+├─ VCC (red) ────→ 3.3V or 5V from PSU
+├─ GND (black) ──→ Common Ground
+└─ DATA (yellow) → ESP32 GPIO15 (ISOLATED BUS)
+
+Pullup Resistor #2:
+4.7kΩ between GPIO15 and 3.3V
+```
+
+**IMPORTANT:** Keep heater sensor wiring SEPARATE from air sensors. Use shielded cable if running near AC power lines. This sensor is safety-critical!
+
+---
+
+## TFT Display (ST7735)
+
+```
+TFT Pin    →  ESP32 Pin
+─────────────────────────
+VCC        →  5V
+GND        →  GND
+CS         →  GPIO5
+RESET      →  GPIO17
+A0 (DC)    →  GPIO16
+SDA (MOSI) →  GPIO23
+SCK (SCLK) →  GPIO18
+LED        →  3.3V (via 100Ω resistor) or 5V (via 220Ω resistor)
+```
+
+**Note:** Some displays have built-in current limiting for LED backlight. Check yours.
+
+---
+
+## 3V SSR (Solid State Relay) for Heater
+
+**OPTION A: Direct connection (if SSR trigger current < 12mA)**
+```
+ESP32 GPIO25 ──→ SSR (+) Input
+ESP32 GND ─────→ SSR (-) Input
+
+SSR Output (Load side):
+AC Hot ──→ SSR Load Terminal 1
+           SSR Load Terminal 2 ──→ 3kW Heater
+                                   Heater ──→ AC Neutral
+```
+
+**OPTION B: Via transistor (if more drive current needed)**
+```
+ESP32 GPIO25 ──→ 1kΩ ──→ NPN Transistor Base
+                         Transistor Emitter ──→ GND
+                         Transistor Collector ──→ SSR (-) Input
+5V or 3.3V ─────────────────────────────────→ SSR (+) Input
+```
+
+**Note:** Most 3V SSRs work fine with direct GPIO connection. Check your SSR datasheet for trigger current (usually 3-10mA, ESP32 can provide 12mA).
+
+---
+
+## 5V Relay for AC Fans (NEEDS TRANSISTOR)
+
+```
+Component Layout:
+
+5V ──→ Relay Coil Terminal 1
+       Relay Coil Terminal 2 ──→ NPN Transistor Collector
+                                 NPN Transistor Emitter ──→ GND
+
+Flyback Diode (1N4007):
+Cathode (stripe) ──→ Relay Coil Terminal 1 (5V side)
+Anode ─────────────→ Relay Coil Terminal 2 (transistor side)
+
+Transistor Control:
+ESP32 GPIO26 ──→ 1kΩ Resistor ──→ NPN Transistor Base
+
+Relay Contacts (AC Load Side):
+AC Hot ──→ Relay COM (Common)
+           Relay NO (Normally Open) ──→ Both AC Fans (parallel)
+                                        Fans ──→ AC Neutral
+```
+
+**Component:** Use 2N2222, BC547, or similar NPN transistor rated for at least 100mA.
+
+---
+
+## 5V DC Cooling Fan (NEEDS TRANSISTOR + DIODE)
+
+```
+Component Layout:
+
+5V ──→ Fan (+) Red Wire
+       Fan (-) Black Wire ──→ NPN Transistor Collector
+                              NPN Transistor Emitter ──→ GND
+
+Flyback Diode (1N4007):
+Cathode (stripe) ──→ Fan (+) / 5V
+Anode ─────────────→ Fan (-) / Transistor Collector
+
+Transistor Control:
+ESP32 GPIO27 ──→ 1kΩ Resistor ──→ NPN Transistor Base
+```
+
+---
+
+## Complete Parts List
+
+### Electronic Components
+- [x] ESP32 Development Board
+- [x] 6x DS18B20 Temperature Sensors
+- [x] 1x 3V/3.3V SSR (40A rated for 3kW heater)
+- [x] 1x 5V Relay Module (10A rated) OR discrete relay
+- [x] 1x ST7735 1.8" TFT Display
+- [x] 1x 5V DC Fan (for electronics cooling)
+- [x] 5V 2A Power Supply (consider upgrading to 3A)
+
+### Additional Components Needed
+- [ ] 2x NPN Transistors (2N2222, BC547, or equivalent)
+- [ ] 2x 1N4007 Diodes (flyback protection)
+- [ ] 3x 1kΩ Resistors (transistor base current limiting)
+- [ ] 2x 4.7kΩ Resistors (DS18B20 pullups - ONE FOR EACH BUS)
+- [ ] 1x 100-220Ω Resistor (TFT backlight, if needed)
+- [ ] Breadboard or prototype PCB
+- [ ] Jumper wires / hookup wire
+- [ ] Screw terminals or connectors for AC wiring
+- [ ] Project enclosure (with ventilation for cooling fan)
+- [ ] Shielded cable (recommended for heater sensor if near AC)
+
+### Safety Equipment for AC Wiring
+- [ ] Wire nuts or terminal blocks
+- [ ] Proper gauge wire for 10A AC (14 AWG minimum)
+- [ ] Fuse or circuit breaker (15-20A)
+- [ ] Electrical tape
+- [ ] Heat shrink tubing
+
+---
+
+## Wiring Safety Notes
+
+⚠️ **AC WIRING WARNINGS:**
+1. **Turn off power** at breaker before wiring AC components
+2. Use **proper gauge wire** (14 AWG for 15A, 12 AWG for 20A)
+3. **Ground everything properly** - AC fans and heater chassis must be grounded
+4. Use **strain relief** on all AC connections
+5. Mount SSR and relay in a **proper enclosure**
+6. Consider adding a **manual emergency shutoff switch**
+7. Test with a **multimeter** before applying power
+8. Consider having a **licensed electrician** verify AC wiring
+
+⚠️ **DC WIRING:**
+1. Double-check **polarity** on all connections
+2. Keep **AC and DC wiring separate** to prevent interference
+3. Use **proper strain relief** on sensor cables
+4. **Label all wires** during assembly
+
+---
+
+## GPIO Pin Summary
+
+| GPIO | Function | Notes |
+|------|----------|-------|
+| 4 | Air Sensors Data | 5 sensors on one wire |
+| 15 | Heater Sensor Data | 1 sensor ISOLATED - safety critical |
+| 5 | TFT CS | SPI Chip Select |
+| 16 | TFT DC (A0) | Data/Command |
+| 17 | TFT RESET | Display reset |
+| 18 | TFT SCK | SPI Clock |
+| 23 | TFT MOSI (SDA) | SPI Data |
+| 25 | Heater SSR Control | 3V output to SSR |
+| 26 | Fan Relay Control | Via transistor |
+| 27 | Cooling Fan Control | Via transistor |
+
+---
+
+## Testing Procedure
+
+### 1. Test DC Components First (NO AC POWER)
+- [ ] Power ESP32 and verify boot
+- [ ] Check all 6 DS18B20 sensors detected
+- [ ] Verify TFT display shows output
+- [ ] Test cooling fan turns on
+- [ ] Test relay clicks when activated (listen/feel)
+- [ ] Verify SSR LED indicator lights up
+
+### 2. Test AC Components (WITH CAUTION)
+- [ ] Connect only ONE AC fan first
+- [ ] Use proper fuse/breaker protection
+- [ ] Test fan relay switching
+- [ ] Add second AC fan if first works
+- [ ] Test heater with proper supervision
+- [ ] Verify safety shutoffs work (disconnect sensor, etc.)
+
+### 3. Integration Testing
+- [ ] Test heating cycle complete
+- [ ] Test cooling cycle complete
+- [ ] Verify safety shutoff at 35°C
+- [ ] Test multiple day/night cycles
+- [ ] Monitor for any false triggers
+
+---
+
+## Troubleshooting
+
+**Sensors not detected:**
+- Check 4.7kΩ pullup resistor is connected
+- Verify all sensors powered (3.3V or 5V)
+- Check data wire continuity
+- Try sensors one at a time
+
+**Display not working:**
+- Verify SPI pins correct for your ESP32 board
+- Check CS, DC, RESET connections
+- Try different rotation setting in code
+- Verify 5V and GND connected
+
+**Relay not switching:**
+- Check transistor connections (C, B, E)
+- Verify 1kΩ base resistor present
+- Test GPIO output with multimeter
+- Check flyback diode polarity
+
+**Heater won't turn on:**
+- Verify SSR getting control voltage
+- Check SSR LED indicator
+- Test SSR with multimeter (should show continuity when on)
+- Verify AC wiring and breaker
