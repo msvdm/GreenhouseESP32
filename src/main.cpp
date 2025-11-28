@@ -17,7 +17,7 @@ const char* ap_password = "xD8ro6rNdcxbMWy!P78H";
 
 #define HEATER_SSR_PIN 25      // GPIO for 3V SSR (heater control)
 #define FAN_RELAY_PIN 26       // GPIO for 5V relay (AC fans control) via transistor
-#define COOLING_FAN_PIN 27     // GPIO for 5V DC cooling fan via transistor
+// #define COOLING_FAN_PIN 27     // GPIO for 5V DC cooling fan via transistor (NOT IMPLEMENTED)
 
 // TFT Display Pins (Hardware SPI)
 #define TFT_CS    5
@@ -77,7 +77,7 @@ float heaterTemp = 0.0;
 // System state
 bool heaterOn = false;
 bool fansOn = false;
-bool coolingFanOn = true;
+// bool coolingFanOn = true;  // NOT IMPLEMENTED
 bool heaterSensorFault = false;
 bool airSensorFault = false;
 int heaterDutyCycle = 0; // 0-255 for PWM
@@ -123,7 +123,7 @@ void setup() {
   
   // Initialize pins
   pinMode(FAN_RELAY_PIN, OUTPUT);
-  pinMode(COOLING_FAN_PIN, OUTPUT);
+  // pinMode(COOLING_FAN_PIN, OUTPUT);  // NOT IMPLEMENTED
   
   // Setup PWM for heater
   ledcSetup(HEATER_PWM_CHANNEL, HEATER_PWM_FREQ, HEATER_PWM_RESOLUTION);
@@ -132,8 +132,7 @@ void setup() {
   // Ensure everything starts OFF (SAFETY)
   ledcWrite(HEATER_PWM_CHANNEL, 0);
   digitalWrite(FAN_RELAY_PIN, LOW);
-  digitalWrite(COOLING_FAN_PIN, LOW); 
-  coolingFanOn = false;
+  // digitalWrite(COOLING_FAN_PIN, LOW);  // NOT IMPLEMENTED
   Serial.println("All outputs initialized to SAFE state");
   Serial.println();
   
@@ -321,7 +320,7 @@ void readLeftTemperatures() {
     }
   }
   
-  if (validCount < numLeftSensors / 2) {
+  if (validCount <= numLeftSensors / 2) {
     leftSensorErrorCount++;
   } else {
     leftSensorErrorCount = 0;
@@ -342,7 +341,7 @@ void readRightTemperatures() {
     }
   }
   
-  if (validCount < numRightSensors / 2) {
+  if (validCount <= numRightSensors / 2) {
     rightSensorErrorCount++;
   } else {
     rightSensorErrorCount = 0;
@@ -369,37 +368,17 @@ void calculateAverage() {
     }
   }
   
-  if (validCount >= 3) { // Need at least 3 working sensors
+  // SINGLE clear logic path - require at least 1 working sensor
+  if (validCount >= 1) {
     averageTemp = sum / validCount;
     airSensorFault = false;
   } else {
     averageTemp = -127.0;
-    if (leftSensorErrorCount >= MAX_SENSOR_ERRORS || rightSensorErrorCount >= MAX_SENSOR_ERRORS) {
-      airSensorFault = true;
-      Serial.print("WARNING: Insufficient air sensors (");
-      Serial.print(validCount);
-      Serial.println(" working)");
-    }
+    airSensorFault = true;
+    Serial.print("WARNING: No air sensors working (");
+    Serial.print(validCount);
+    Serial.println(" available)");
   }
-    if (validCount >= 2) { // keep your original 3-sensor requirement if desired
-    averageTemp = sum / validCount;
-    airSensorFault = false;
-  } else {
-    averageTemp = -127.0;
-    // Immediate air sensor fault if fewer than 2 sensors working (adjust threshold as you want)
-    if (validCount < 1) {
-      airSensorFault = true;
-      Serial.print("WARNING: Insufficient air sensors (");
-      Serial.print(validCount);
-      Serial.println(" working) -> airSensorFault set");
-      emergencyShutdown();
-    } else {
-      // borderline case: just compute average with what we have
-      averageTemp = (validCount > 0) ? (sum / validCount) : -127.0;
-      airSensorFault = false;
-    }
-  }
-
 }
 
 void controlSystem() {
@@ -527,7 +506,7 @@ void controlSystem() {
 
     Serial.print("IDLE MODE | Avg: ");
     Serial.print(averageTemp, 1);
-    Serial.println("°C");
+    Serial.println("C");
   }
 }
 
@@ -550,7 +529,7 @@ void heaterSafetyCheck() {
   if (heaterTemp >= HEATER_SAFETY_MAX) {
     Serial.print("CRITICAL SAFETY: Heater temp too high: ");
     Serial.print(heaterTemp, 1);
-    Serial.println("°C");
+    Serial.println("C");
     
     if (heaterOn) {
       heaterOn = false;
@@ -690,7 +669,10 @@ void handleStatusJSON() {
   json += "\"heater\":" + String(heaterOn ? "1" : "0") + ",";
   json += "\"fans\":" + String(fansOn ? "1" : "0") + ",";
   json += "\"heat_temp\":" + String(heaterTemp, 1) + ",";
-  json += "\"pwm\":" + String(heaterDutyCycle);
+  json += "\"pwm\":" + String(heaterDutyCycle) + ",";
+  json += "\"temp_min\":" + String(TEMP_MIN, 1) + ",";
+  json += "\"temp_max\":" + String(TEMP_MAX, 1) + ",";
+  json += "\"heater_max\":" + String(HEATER_SAFETY_MAX, 1);
   json += "}";
   server.send(200, "application/json", json);
 }
@@ -754,25 +736,33 @@ String getHTMLPage() {
   html += ".status.on{background:#4CAF50;color:#000;}";
   html += ".status.off{background:#666;color:#ccc;}";
   html += ".status.fault{background:#f44336;color:#fff;}";
-  html += ".control{display:flex;justify-content:space-between;align-items:center;margin:10px 0;padding:10px;background:#333;border-radius:5px;}";
+  html += ".control{display:flex;justify-content:space-between;align-items:center;margin:10px 0;padding:10px;background:#333;border-radius:5px;gap:10px;}";
   html += ".btn{background:#4CAF50;border:none;color:#000;padding:10px 20px;font-size:18px;font-weight:bold;border-radius:5px;cursor:pointer;margin:0 5px;}";
   html += ".btn:active{background:#45a049;}";
   html += ".value{font-size:20px;font-weight:bold;color:#4CAF50;min-width:60px;text-align:center;}";
   html += ".error{color:#f44336;}";
   html += "</style>";
 
-  // JAVASCRIPT AUTO-UPDATE
+  // JAVASCRIPT AUTO-UPDATE & BUTTON HANDLERS
   html += "<script>";
   html += "async function updateStatus(){";
   html += "try{";
   html += "const r=await fetch('/status');";
   html += "const d=await r.json();";
-  html += "document.getElementById('avgTemp').textContent=(d.avg>-100)?d.avg.toFixed(1)+'°C':'ERR';";
+  html += "document.getElementById('avgTemp').textContent=(d.avg>-100)?d.avg.toFixed(1)+'C':'ERR';";
   html += "document.getElementById('heaterState').textContent=(d.heater=='1')?'ON':'OFF';";
   html += "document.getElementById('fansState').textContent=(d.fans=='1')?'ON':'OFF';";
-  html += "document.getElementById('heatTemp').textContent=(d.heat_temp>-100)?d.heat_temp.toFixed(1)+'°C':'ERR';";
+  html += "document.getElementById('heatTemp').textContent=(d.heat_temp>-100)?d.heat_temp.toFixed(1)+'C':'ERR';";
   html += "document.getElementById('pwmVal').textContent=d.pwm+'/255';";
+  html += "document.getElementById('tempMinVal').textContent=d.temp_min.toFixed(1)+'C';";
+  html += "document.getElementById('tempMaxVal').textContent=d.temp_max.toFixed(1)+'C';";
+  html += "document.getElementById('heaterMaxVal').textContent=d.heater_max.toFixed(1)+'C';";
   html += "}catch(e){ console.log('Update failed'); }}";
+  html += "async function adjust(param,action){";
+  html += "try{";
+  html += "await fetch('/adjust?param='+param+'&action='+action);";
+  html += "setTimeout(updateStatus, 100);";
+  html += "}catch(e){ console.log('Adjust failed'); }}";
   html += "setInterval(updateStatus, 2000);";
   html += "window.onload = updateStatus;";
   html += "</script>";
@@ -807,12 +797,12 @@ String getHTMLPage() {
 
   html += "<div style='text-align:center;margin:15px 0;'>";
   html += "<div class='label'>AVERAGE</div>";
-  html += "<div class='temp'><span id='avgTemp'>" + String(averageTemp, 1) + "°C</span></div>";
+  html += "<div class='temp'><span id='avgTemp'>" + String(averageTemp, 1) + "C</span></div>";
   html += "</div>";
 
   html += "<div style='text-align:center;margin:10px 0;'>";
   html += "<div class='label'>HEATER</div>";
-  html += "<div class='temp' style='color:#FF6B6B;'><span id='heatTemp'>" + String(heaterTemp, 1) + "°C</span></div>";
+  html += "<div class='temp' style='color:#FF6B6B;'><span id='heatTemp'>" + String(heaterTemp, 1) + "C</span></div>";
   html += "</div>";
   html += "</div>";
 
@@ -824,7 +814,7 @@ String getHTMLPage() {
     html += "<div class='sensor'>";
     html += "<div class='label'>L" + String(i) + "</div>";
     if (leftTemperatures[i] > -100)
-      html += "<div class='temp' style='color:#87CEEB;'>" + String(leftTemperatures[i], 1) + "°C</div>";
+      html += "<div class='temp' style='color:#87CEEB;'>" + String(leftTemperatures[i], 1) + "C</div>";
     else
       html += "<div class='temp error'>ERROR</div>";
     html += "</div>";
@@ -839,7 +829,7 @@ String getHTMLPage() {
     html += "<div class='sensor'>";
     html += "<div class='label'>R" + String(i) + "</div>";
     if (rightTemperatures[i] > -100)
-      html += "<div class='temp' style='color:#87CEEB;'>" + String(rightTemperatures[i], 1) + "°C</div>";
+      html += "<div class='temp' style='color:#87CEEB;'>" + String(rightTemperatures[i], 1) + "C</div>";
     else
       html += "<div class='temp error'>ERROR</div>";
     html += "</div>";
@@ -852,45 +842,27 @@ String getHTMLPage() {
 
   // HEATING THRESHOLD
   html += "<div class='control'>";
-  html += "<div><span class='label'>Heating Threshold</span><br>";
-  html += "<span style='font-size:18px;'>Turn ON below:</span></div>";
-  html += "<div class='value'>" + String(TEMP_MIN, 1) + "°C</div>";
-  html += "<div>";
-  html += "<form method='GET' action='/adjust' style='display:inline;'>";
-  html += "<input type='hidden' name='param' value='tempmin'><input type='hidden' name='action' value='up'>";
-  html += "<button class='btn'>▲</button></form>";
-  html += "<form method='GET' action='/adjust' style='display:inline;'>";
-  html += "<input type='hidden' name='param' value='tempmin'><input type='hidden' name='action' value='down'>";
-  html += "<button class='btn'>▼</button></form>";
-  html += "</div></div>";
+  html += "<span class='label' style='min-width:120px;'>Heating ON at:</span>";
+  html += "<div class='value' id='tempMinVal' style='min-width:50px;'>" + String(TEMP_MIN, 1) + "C</div>";
+  html += "<button class='btn' style='padding:8px 15px;font-size:14px;margin:0 2px;' onclick='adjust(\"tempmin\",\"up\"); return false;'>[+]</button>";
+  html += "<button class='btn' style='padding:8px 15px;font-size:14px;margin:0 2px;' onclick='adjust(\"tempmin\",\"down\"); return false;'>[-]</button>";
+  html += "</div>";
 
   // COOLING THRESHOLD
   html += "<div class='control'>";
-  html += "<div><span class='label'>Cooling Threshold</span><br>";
-  html += "<span style='font-size:18px;'>Turn ON above:</span></div>";
-  html += "<div class='value'>" + String(TEMP_MAX, 1) + "°C</div>";
-  html += "<div>";
-  html += "<form method='GET' action='/adjust' style='display:inline;'>";
-  html += "<input type='hidden' name='param' value='tempmax'><input type='hidden' name='action' value='up'>";
-  html += "<button class='btn'>▲</button></form>";
-  html += "<form method='GET' action='/adjust' style='display:inline;'>";
-  html += "<input type='hidden' name='param' value='tempmax'><input type='hidden' name='action' value='down'>";
-  html += "<button class='btn'>▼</button></form>";
-  html += "</div></div>";
+  html += "<span class='label' style='min-width:120px;'>Cooling ON at:</span>";
+  html += "<div class='value' id='tempMaxVal' style='min-width:50px;'>" + String(TEMP_MAX, 1) + "C</div>";
+  html += "<button class='btn' style='padding:8px 15px;font-size:14px;margin:0 2px;' onclick='adjust(\"tempmax\",\"up\"); return false;'>[+]</button>";
+  html += "<button class='btn' style='padding:8px 15px;font-size:14px;margin:0 2px;' onclick='adjust(\"tempmax\",\"down\"); return false;'>[-]</button>";
+  html += "</div>";
 
   // HEATER MAX TEMP
   html += "<div class='control'>";
-  html += "<div><span class='label'>Heater Safety Max</span><br>";
-  html += "<span style='font-size:18px;'>Shutdown above:</span></div>";
-  html += "<div class='value'>" + String(HEATER_SAFETY_MAX, 1) + "°C</div>";
-  html += "<div>";
-  html += "<form method='GET' action='/adjust' style='display:inline;'>";
-  html += "<input type='hidden' name='param' value='heatmax'><input type='hidden' name='action' value='up'>";
-  html += "<button class='btn'>▲</button></form>";
-  html += "<form method='GET' action='/adjust' style='display:inline;'>";
-  html += "<input type='hidden' name='param' value='heatmax'><input type='hidden' name='action' value='down'>";
-  html += "<button class='btn'>▼</button></form>";
-  html += "</div></div>";
+  html += "<span class='label' style='min-width:120px;'>Heater Max at:</span>";
+  html += "<div class='value' id='heaterMaxVal' style='min-width:50px;'>" + String(HEATER_SAFETY_MAX, 1) + "C</div>";
+  html += "<button class='btn' style='padding:8px 15px;font-size:14px;margin:0 2px;' onclick='adjust(\"heatmax\",\"up\"); return false;'>[+]</button>";
+  html += "<button class='btn' style='padding:8px 15px;font-size:14px;margin:0 2px;' onclick='adjust(\"heatmax\",\"down\"); return false;'>[-]</button>";
+  html += "</div>";
 
   html += "</div>"; // close card
   html += "</div>"; // close container

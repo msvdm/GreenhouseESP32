@@ -226,7 +226,7 @@ ESP32 GPIO27 ──→ 1kΩ Resistor ──→ NPN Transistor Base
 ### 3. Integration Testing
 - [ ] Test heating cycle complete
 - [ ] Test cooling cycle complete
-- [ ] Verify safety shutoff at 35°C
+- [ ] Verify safety shutoff at 35C
 - [ ] Test multiple day/night cycles
 - [ ] Monitor for any false triggers
 

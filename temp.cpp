@@ -446,7 +446,7 @@ void controlSystem() {
       digitalWrite(FAN_RELAY_PIN, HIGH);
       Serial.print("COOLING MODE: Fans ON | Avg: ");
       Serial.print(averageTemp, 1);
-      Serial.println("°C");
+      Serial.println("C");
     }
     
     // Turn off fans when temp drops
@@ -467,7 +467,7 @@ void controlSystem() {
       digitalWrite(FAN_RELAY_PIN, LOW);
       Serial.print("IDLE MODE | Avg: ");
       Serial.print(averageTemp, 1);
-      Serial.println("°C");
+      Serial.println("C");
     }
   }
 }
@@ -491,7 +491,7 @@ void heaterSafetyCheck() {
   if (heaterTemp >= HEATER_SAFETY_MAX) {
     Serial.print("CRITICAL SAFETY: Heater temp too high: ");
     Serial.print(heaterTemp, 1);
-    Serial.println("°C");
+    Serial.println("C");
     
     if (heaterOn) {
       heaterOn = false;

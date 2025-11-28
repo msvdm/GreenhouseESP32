@@ -446,7 +446,7 @@ void controlSystem() {
       digitalWrite(FAN_RELAY_PIN, HIGH);
       Serial.print("COOLING MODE: Fans ON | Avg: ");
       Serial.print(averageTemp, 1);
-      Serial.println("°C");
+      Serial.println("C");
     }
     
     // Turn off fans when temp drops
@@ -467,7 +467,7 @@ void controlSystem() {
       digitalWrite(FAN_RELAY_PIN, LOW);
       Serial.print("IDLE MODE | Avg: ");
       Serial.print(averageTemp, 1);
-      Serial.println("°C");
+      Serial.println("C");
     }
   }
 }
@@ -491,7 +491,7 @@ void heaterSafetyCheck() {
   if (heaterTemp >= HEATER_SAFETY_MAX) {
     Serial.print("CRITICAL SAFETY: Heater temp too high: ");
     Serial.print(heaterTemp, 1);
-    Serial.println("°C");
+    Serial.println("C");
     
     if (heaterOn) {
       heaterOn = false;
@@ -713,7 +713,7 @@ String getHTMLPage() {
   html += "<div style='text-align:center;margin:15px 0;'>";
   html += "<div class='label'>AVERAGE</div>";
   if (averageTemp > -100) {
-    html += "<div class='temp'>" + String(averageTemp, 1) + "°C</div>";
+    html += "<div class='temp'>" + String(averageTemp, 1) + "C</div>";
   } else {
     html += "<div class='temp error'>ERROR</div>";
   }
@@ -722,7 +722,7 @@ String getHTMLPage() {
   html += "<div style='text-align:center;margin:10px 0;'>";
   html += "<div class='label'>HEATER</div>";
   if (heaterTemp > -100) {
-    html += "<div class='temp' style='color:#FF6B6B;'>" + String(heaterTemp, 1) + "°C</div>";
+    html += "<div class='temp' style='color:#FF6B6B;'>" + String(heaterTemp, 1) + "C</div>";
   } else {
     html += "<div class='temp error'>ERROR</div>";
   }
@@ -737,7 +737,7 @@ String getHTMLPage() {
     html += "<div class='sensor'>";
     html += "<div class='label'>L" + String(i) + "</div>";
     if (leftTemperatures[i] > -100) {
-      html += "<div class='temp' style='color:#87CEEB;'>" + String(leftTemperatures[i], 1) + "°C</div>";
+      html += "<div class='temp' style='color:#87CEEB;'>" + String(leftTemperatures[i], 1) + "C</div>";
     } else {
       html += "<div class='temp error'>ERROR</div>";
     }
@@ -754,7 +754,7 @@ String getHTMLPage() {
     html += "<div class='sensor'>";
     html += "<div class='label'>R" + String(i) + "</div>";
     if (rightTemperatures[i] > -100) {
-      html += "<div class='temp' style='color:#87CEEB;'>" + String(rightTemperatures[i], 1) + "°C</div>";
+      html += "<div class='temp' style='color:#87CEEB;'>" + String(rightTemperatures[i], 1) + "C</div>";
     } else {
       html += "<div class='temp error'>ERROR</div>";
     }
@@ -769,7 +769,7 @@ String getHTMLPage() {
   
   html += "<div class='control'>";
   html += "<div><span class='label'>Heating Threshold</span><br><span style='font-size:18px;'>Turn ON below:</span></div>";
-  html += "<div class='value'>" + String(TEMP_MIN, 1) + "°C</div>";
+  html += "<div class='value'>" + String(TEMP_MIN, 1) + "C</div>";
   html += "<div>";
   html += "<form method='GET' action='/adjust' style='display:inline;'>";
   html += "<input type='hidden' name='param' value='tempmin'>";
@@ -787,7 +787,7 @@ String getHTMLPage() {
   // Control Panel - Cooling Threshold
   html += "<div class='control'>";
   html += "<div><span class='label'>Cooling Threshold</span><br><span style='font-size:18px;'>Turn ON above:</span></div>";
-  html += "<div class='value'>" + String(TEMP_MAX, 1) + "°C</div>";
+  html += "<div class='value'>" + String(TEMP_MAX, 1) + "C</div>";
   html += "<div>";
   html += "<form method='GET' action='/adjust' style='display:inline;'>";
   html += "<input type='hidden' name='param' value='tempmax'>";
@@ -805,7 +805,7 @@ String getHTMLPage() {
   // Control Panel - Heater Safety Max
   html += "<div class='control'>";
   html += "<div><span class='label'>Heater Safety Max</span><br><span style='font-size:18px;'>Shutdown above:</span></div>";
-  html += "<div class='value'>" + String(HEATER_SAFETY_MAX, 1) + "°C</div>";
+  html += "<div class='value'>" + String(HEATER_SAFETY_MAX, 1) + "C</div>";
   html += "<div>";
   html += "<form method='GET' action='/adjust' style='display:inline;'>";
   html += "<input type='hidden' name='param' value='heatmax'>";
