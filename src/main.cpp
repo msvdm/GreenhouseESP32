@@ -69,10 +69,11 @@ int numRightSensors = 0;
 bool heaterSensorDetected = false;
 
 // Temperature readings
-float leftTemperatures[3];
-float rightTemperatures[3];
-float averageTemp = 0.0;
-float heaterTemp = 0.0;
+// Initialize to an out-of-range sentinel so un-read sensors are clearly invalid
+float leftTemperatures[3] = {-127.0, -127.0, -127.0};
+float rightTemperatures[3] = {-127.0, -127.0, -127.0};
+float averageTemp = -127.0;
+float heaterTemp = -127.0;
 
 // System state
 bool heaterOn = false;
@@ -92,6 +93,9 @@ int heaterSensorErrorCount = 0;
 int leftSensorErrorCount = 0;
 int rightSensorErrorCount = 0;
 #define MAX_SENSOR_ERRORS 3
+
+// Web server IP (stored for display)
+String webServerIP = "192.168.4.1";
 
 // Function declarations
 void readHeaterTemperature();
@@ -237,6 +241,9 @@ void setup() {
   Serial.print("AP IP address: ");
   Serial.println(IP);
   
+  // Store IP as string for display
+  webServerIP = IP.toString();
+  
   tft.println("WiFi: Green");
   tft.print("IP: ");
   tft.println(IP);
@@ -251,6 +258,19 @@ void setup() {
   Serial.println("=================================");
   Serial.println("Setup complete - entering main loop");
   Serial.println("=================================\n");
+  
+  Serial.println("Taking initial temperature readings...");
+  // Perform an initial set of readings so arrays are populated before loop()
+  readLeftTemperatures();
+  delay(750); // allow DS18B20 conversion to complete (12-bit ~750ms)
+  readRightTemperatures();
+  delay(750);
+  readHeaterTemperature();
+  calculateAverage();
+  
+  Serial.print("Initial average temperature: ");
+  Serial.println(averageTemp);
+  Serial.println("Entering main loop...\n");
 }
 
 void loop() {
@@ -351,33 +371,34 @@ void readRightTemperatures() {
 void calculateAverage() {
   float sum = 0.0;
   int validCount = 0;
-  
-  // Add LEFT sensors
+
+  // Add LEFT sensors (only accept reasonable values)
   for (int i = 0; i < numLeftSensors && i < 3; i++) {
-    if (leftTemperatures[i] > -100) {
+    if (leftTemperatures[i] > -100 && leftTemperatures[i] < 60) {
       sum += leftTemperatures[i];
       validCount++;
     }
   }
-  
-  // Add RIGHT sensors
+
+  // Add RIGHT sensors (only accept reasonable values)
   for (int i = 0; i < numRightSensors && i < 3; i++) {
-    if (rightTemperatures[i] > -100) {
+    if (rightTemperatures[i] > -100 && rightTemperatures[i] < 60) {
       sum += rightTemperatures[i];
       validCount++;
     }
   }
-  
-  // SINGLE clear logic path - require at least 1 working sensor
+
   if (validCount >= 1) {
     averageTemp = sum / validCount;
     airSensorFault = false;
   } else {
     averageTemp = -127.0;
     airSensorFault = true;
-    Serial.print("WARNING: No air sensors working (");
+    Serial.print("WARNING: No air sensors working (valid: ");
     Serial.print(validCount);
-    Serial.println(" available)");
+    Serial.print(" / expected: ");
+    Serial.print(numLeftSensors + numRightSensors);
+    Serial.println(")");
   }
 }
 
@@ -557,102 +578,134 @@ void emergencyShutdown() {
 }
 
 void updateDisplay() {
-  tft.fillScreen(ST77XX_BLACK);
-  tft.setCursor(0, 0);
-  tft.setTextSize(1);
+  // Selective update: only update changed values instead of full screen refresh
+  static bool isFirstUpdate = true;
   
-  // Title
-  tft.setTextColor(ST77XX_GREEN);
-  tft.println("GREENHOUSE WEB");
-  tft.println("===============");
-  
-  // Fault indicators
-  if (heaterSensorFault || airSensorFault) {
-    tft.setTextColor(ST77XX_RED);
-    tft.setTextSize(2);
-    tft.println("FAULT!");
+  if (isFirstUpdate) {
+    // First update: full screen refresh to set everything up
+    tft.fillScreen(ST77XX_BLACK);
+    tft.setCursor(0, 0);
     tft.setTextSize(1);
-    if (heaterSensorFault) tft.println("Heater sensor");
-    if (airSensorFault) tft.println("Air sensors");
+    
+    // Title with WebUI IP
+    tft.setTextColor(ST77XX_GREEN);
+    tft.print("WebControl at ");
+    tft.println(webServerIP);
+    tft.println("===============");
+    
+    // Empty row for spacing
     tft.println();
-  }
-  
-  // Average temperature
-  tft.setTextSize(2);
-  if (averageTemp > -100) {
-    tft.setTextColor(ST77XX_YELLOW);
-    tft.print("Avg:");
-    tft.print(averageTemp, 1);
-    tft.println("C");
+    
+    // Average temperature (larger font)
+    tft.setCursor(0, 35);
+    tft.setTextSize(3);
+    if (averageTemp > -100) {
+      tft.setTextColor(ST77XX_YELLOW);
+      tft.print("Avg:");
+      tft.print(averageTemp, 1);
+      tft.println("C");
+    } else {
+      tft.setTextColor(ST77XX_RED);
+      tft.println("Avg: ERR");
+    }
+    
+    // Empty row
+    tft.setTextSize(1);
+    tft.println();
+    
+    // Heater sensor temperature
+    if (heaterTemp > -100) {
+      if (heaterTemp >= HEATER_SAFETY_MAX - 3) {
+        tft.setTextColor(ST77XX_RED);
+      } else if (heaterTemp >= HEATER_SAFETY_MAX - 5) {
+        tft.setTextColor(ST77XX_ORANGE);
+      } else {
+        tft.setTextColor(ST77XX_CYAN);
+      }
+      tft.print("Heat:");
+      tft.print(heaterTemp, 1);
+      tft.print("C PWM:");
+      tft.println(heaterDutyCycle);
+    } else {
+      tft.setTextColor(ST77XX_RED);
+      tft.println("Heat: FAULT");
+    }
+    
+    // Empty row
+    tft.println();
+    
+    // System status
+    tft.setTextColor(ST77XX_WHITE);
+    tft.print("HTR:");
+    tft.setTextColor(heaterOn ? ST77XX_RED : ST77XX_WHITE);
+    tft.print(heaterOn ? "ON " : "OFF");
+    
+    tft.setTextColor(ST77XX_WHITE);
+    tft.print(" FAN:");
+    tft.setTextColor(fansOn ? ST77XX_GREEN : ST77XX_WHITE);
+    tft.println(fansOn ? "ON" : "OFF");
+    
+    // Empty row
+    tft.setTextColor(ST77XX_WHITE);
+    tft.println();
+    
+    // Fault indicators
+    if (heaterSensorFault || airSensorFault) {
+      tft.setTextColor(ST77XX_RED);
+      tft.print("FAULT: ");
+      if (heaterSensorFault) tft.print("Heater ");
+      if (airSensorFault) tft.println("Air");
+      tft.println();
+    }
+    
+    // Combined Sensors list (LEFT + RIGHT together, orange)
+    tft.setTextColor(ST77XX_ORANGE);
+    tft.println("Sensors:");
+    
+    for (int i = 0; i < numLeftSensors && i < 3; i++) {
+      tft.print("L");
+      tft.print(i);
+      tft.print(":");
+      if (leftTemperatures[i] > -100) {
+        tft.print(leftTemperatures[i], 1);
+      } else {
+        tft.setTextColor(ST77XX_RED);
+        tft.print("ERR");
+        tft.setTextColor(ST77XX_ORANGE);
+      }
+      tft.print(" ");
+    }
+    
+    for (int i = 0; i < numRightSensors && i < 3; i++) {
+      tft.print("R");
+      tft.print(i);
+      tft.print(":");
+      if (rightTemperatures[i] > -100) {
+        tft.print(rightTemperatures[i], 1);
+      } else {
+        tft.setTextColor(ST77XX_RED);
+        tft.print("ERR");
+        tft.setTextColor(ST77XX_ORANGE);
+      }
+      tft.print(" ");
+    }
+    
+    isFirstUpdate = false;
   } else {
-    tft.setTextColor(ST77XX_RED);
-    tft.println("Avg: ERR");
-  }
-  
-  // Heater sensor temperature
-  tft.setTextSize(1);
-  if (heaterTemp > -100) {
-    if (heaterTemp >= HEATER_SAFETY_MAX - 3) {
-      tft.setTextColor(ST77XX_RED);
-    } else if (heaterTemp >= HEATER_SAFETY_MAX - 5) {
-      tft.setTextColor(ST77XX_ORANGE);
-    } else {
-      tft.setTextColor(ST77XX_CYAN);
-    }
-    tft.print("Heat:");
-    tft.print(heaterTemp, 1);
-    tft.print("C PWM:");
-    tft.println(heaterDutyCycle);
-  } else {
-    tft.setTextColor(ST77XX_RED);
-    tft.println("Heat: FAULT");
-  }
-  
-  // System status
-  tft.setTextColor(ST77XX_WHITE);
-  tft.println();
-  tft.print("HTR:");
-  tft.setTextColor(heaterOn ? ST77XX_RED : ST77XX_WHITE);
-  tft.print(heaterOn ? "ON " : "OFF");
-  
-  tft.setTextColor(ST77XX_WHITE);
-  tft.print(" FAN:");
-  tft.setTextColor(fansOn ? ST77XX_GREEN : ST77XX_WHITE);
-  tft.println(fansOn ? "ON" : "OFF");
-  
-  // LEFT sensors
-  tft.setTextColor(ST77XX_BLUE);
-  tft.println();
-  tft.println("LEFT:");
-  for (int i = 0; i < numLeftSensors && i < 3; i++) {
-    tft.print("L");
-    tft.print(i);
-    tft.print(":");
-    if (leftTemperatures[i] > -100) {
-      tft.print(leftTemperatures[i], 1);
+    // Subsequent updates: only refresh key areas
+    // Update average temperature
+    tft.setCursor(0, 35);
+    tft.setTextSize(3);
+    tft.fillRect(0, 35, 160, 30, ST77XX_BLACK);  // Clear avg temp area
+    if (averageTemp > -100) {
+      tft.setTextColor(ST77XX_YELLOW);
+      tft.print("Avg:");
+      tft.print(averageTemp, 1);
+      tft.println("C");
     } else {
       tft.setTextColor(ST77XX_RED);
-      tft.print("ERR");
-      tft.setTextColor(ST77XX_BLUE);
+      tft.println("Avg: ERR");
     }
-    tft.print(" ");
-  }
-  
-  // RIGHT sensors
-  tft.println();
-  tft.println("RIGHT:");
-  for (int i = 0; i < numRightSensors && i < 3; i++) {
-    tft.print("R");
-    tft.print(i);
-    tft.print(":");
-    if (rightTemperatures[i] > -100) {
-      tft.print(rightTemperatures[i], 1);
-    } else {
-      tft.setTextColor(ST77XX_RED);
-      tft.print("ERR");
-      tft.setTextColor(ST77XX_BLUE);
-    }
-    tft.print(" ");
   }
 }
 
@@ -732,6 +785,7 @@ String getHTMLPage() {
   html += ".sensor{background:#333;padding:10px;border-radius:5px;text-align:center;}";
   html += ".temp{font-size:24px;font-weight:bold;color:#FFA500;}";
   html += ".label{font-size:12px;color:#aaa;}";
+  html += ".control-label{font-size:18px;color:#fff;font-weight:700;}";
   html += ".status{display:inline-block;padding:5px 15px;border-radius:15px;margin:5px;font-weight:bold;}";
   html += ".status.on{background:#4CAF50;color:#000;}";
   html += ".status.off{background:#666;color:#ccc;}";
@@ -806,10 +860,11 @@ String getHTMLPage() {
   html += "</div>";
   html += "</div>";
 
-  // LEFT SENSORS
+  // SENSORS (combined LEFT + RIGHT)
   html += "<div class='card'>";
-  html += "<h2 style='margin-top:0;'>LEFT Sensors</h2>";
+  html += "<h2 style='margin-top:0;'>Sensors</h2>";
   html += "<div class='sensor-grid'>";
+  // LEFT sensors
   for (int i = 0; i < numLeftSensors && i < 3; i++) {
     html += "<div class='sensor'>";
     html += "<div class='label'>L" + String(i) + "</div>";
@@ -819,12 +874,7 @@ String getHTMLPage() {
       html += "<div class='temp error'>ERROR</div>";
     html += "</div>";
   }
-  html += "</div></div>";
-
-  // RIGHT SENSORS
-  html += "<div class='card'>";
-  html += "<h2 style='margin-top:0;'>RIGHT Sensors</h2>";
-  html += "<div class='sensor-grid'>";
+  // RIGHT sensors
   for (int i = 0; i < numRightSensors && i < 3; i++) {
     html += "<div class='sensor'>";
     html += "<div class='label'>R" + String(i) + "</div>";
@@ -842,26 +892,26 @@ String getHTMLPage() {
 
   // HEATING THRESHOLD
   html += "<div class='control'>";
-  html += "<span class='label' style='min-width:120px;'>Heating ON at:</span>";
+  html += "<span class='control-label' style='min-width:120px;'>Heating ON at:</span>";
   html += "<div class='value' id='tempMinVal' style='min-width:50px;'>" + String(TEMP_MIN, 1) + "C</div>";
-  html += "<button class='btn' style='padding:8px 15px;font-size:14px;margin:0 2px;' onclick='adjust(\"tempmin\",\"up\"); return false;'>[+]</button>";
   html += "<button class='btn' style='padding:8px 15px;font-size:14px;margin:0 2px;' onclick='adjust(\"tempmin\",\"down\"); return false;'>[-]</button>";
+  html += "<button class='btn' style='padding:8px 15px;font-size:14px;margin:0 2px;' onclick='adjust(\"tempmin\",\"up\"); return false;'>[+]</button>";
   html += "</div>";
 
   // COOLING THRESHOLD
   html += "<div class='control'>";
-  html += "<span class='label' style='min-width:120px;'>Cooling ON at:</span>";
+  html += "<span class='control-label' style='min-width:120px;'>Cooling ON at:</span>";
   html += "<div class='value' id='tempMaxVal' style='min-width:50px;'>" + String(TEMP_MAX, 1) + "C</div>";
-  html += "<button class='btn' style='padding:8px 15px;font-size:14px;margin:0 2px;' onclick='adjust(\"tempmax\",\"up\"); return false;'>[+]</button>";
   html += "<button class='btn' style='padding:8px 15px;font-size:14px;margin:0 2px;' onclick='adjust(\"tempmax\",\"down\"); return false;'>[-]</button>";
+  html += "<button class='btn' style='padding:8px 15px;font-size:14px;margin:0 2px;' onclick='adjust(\"tempmax\",\"up\"); return false;'>[+]</button>";
   html += "</div>";
 
   // HEATER MAX TEMP
   html += "<div class='control'>";
-  html += "<span class='label' style='min-width:120px;'>Heater Max at:</span>";
+  html += "<span class='control-label' style='min-width:120px;'>Heater Max at:</span>";
   html += "<div class='value' id='heaterMaxVal' style='min-width:50px;'>" + String(HEATER_SAFETY_MAX, 1) + "C</div>";
-  html += "<button class='btn' style='padding:8px 15px;font-size:14px;margin:0 2px;' onclick='adjust(\"heatmax\",\"up\"); return false;'>[+]</button>";
   html += "<button class='btn' style='padding:8px 15px;font-size:14px;margin:0 2px;' onclick='adjust(\"heatmax\",\"down\"); return false;'>[-]</button>";
+  html += "<button class='btn' style='padding:8px 15px;font-size:14px;margin:0 2px;' onclick='adjust(\"heatmax\",\"up\"); return false;'>[+]</button>";
   html += "</div>";
 
   html += "</div>"; // close card
