@@ -26,10 +26,7 @@ const char* ap_password = "xD8ro6rNdcxbMWy!P78H";
 #define TFT_SCLK  18           // SCK
 #define TFT_MOSI  23           // SDA/MOSI
 
-// PWM Configuration for Heater
-#define HEATER_PWM_CHANNEL 0
-#define HEATER_PWM_FREQ 1      // 1 Hz (slow for thermal mass)
-#define HEATER_PWM_RESOLUTION 8 // 0-255
+// Heater control is a simple ON/OFF digital output (GPIO 25)
 
 // Temperature Thresholds (now adjustable via web interface)
 float TEMP_MIN = 10.0;          // Turn on heating below this
@@ -80,7 +77,7 @@ bool fansOn = false;
 bool coolingFanOn = true;
 bool heaterSensorFault = false;
 bool airSensorFault = false;
-int heaterDutyCycle = 0; // 0-255 for PWM
+int heaterDutyCycle = 0; // 0 == OFF, 1 == ON (digital heater control)
 
 // Timing variables
 unsigned long lastAirTempRead = 0;
@@ -125,12 +122,11 @@ void setup() {
   pinMode(FAN_RELAY_PIN, OUTPUT);
   pinMode(COOLING_FAN_PIN, OUTPUT);
   
-  // Setup PWM for heater
-  ledcSetup(HEATER_PWM_CHANNEL, HEATER_PWM_FREQ, HEATER_PWM_RESOLUTION);
-  ledcAttachPin(HEATER_SSR_PIN, HEATER_PWM_CHANNEL);
+  // Configure heater pin as a plain digital output (no PWM)
+  pinMode(HEATER_SSR_PIN, OUTPUT);
   
   // Ensure everything starts OFF (SAFETY)
-  ledcWrite(HEATER_PWM_CHANNEL, 0);
+  digitalWrite(HEATER_SSR_PIN, LOW);
   digitalWrite(FAN_RELAY_PIN, LOW);
   digitalWrite(COOLING_FAN_PIN, HIGH); // Turn on cooling fan immediately
   
@@ -408,18 +404,18 @@ void controlSystem() {
     if (heaterTemp < HEATER_SAFETY_MAX - 5.0) {
       // Safe zone - use proportional control
       float tempMargin = HEATER_SAFETY_MAX - heaterTemp;
-      heaterDutyCycle = map(constrain(tempMargin, 5, 15), 5, 15, 128, 255);
-      ledcWrite(HEATER_PWM_CHANNEL, heaterDutyCycle);
+        heaterDutyCycle = 1;
+        digitalWrite(HEATER_SSR_PIN, HIGH);
       heaterOn = true;
     } else if (heaterTemp < HEATER_SAFETY_MAX - 2.0) {
       // Approaching limit - reduce power
-      heaterDutyCycle = 64;
-      ledcWrite(HEATER_PWM_CHANNEL, heaterDutyCycle);
+        heaterDutyCycle = 1;
+        digitalWrite(HEATER_SSR_PIN, HIGH);
       heaterOn = true;
     } else {
       // Too close to limit - turn off
-      heaterDutyCycle = 0;
-      ledcWrite(HEATER_PWM_CHANNEL, 0);
+        heaterDutyCycle = 0;
+        digitalWrite(HEATER_SSR_PIN, LOW);
       heaterOn = false;
     }
     
@@ -428,7 +424,7 @@ void controlSystem() {
       heaterOn = false;
       fansOn = false;
       heaterDutyCycle = 0;
-      ledcWrite(HEATER_PWM_CHANNEL, 0);
+        digitalWrite(HEATER_SSR_PIN, LOW);
       digitalWrite(FAN_RELAY_PIN, LOW);
       Serial.println("Target reached: Heater and fans OFF");
     }
@@ -440,7 +436,7 @@ void controlSystem() {
       if (heaterOn) {
         heaterOn = false;
         heaterDutyCycle = 0;
-        ledcWrite(HEATER_PWM_CHANNEL, 0);
+        digitalWrite(HEATER_SSR_PIN, LOW);
       }
       fansOn = true;
       digitalWrite(FAN_RELAY_PIN, HIGH);
@@ -463,7 +459,7 @@ void controlSystem() {
       heaterOn = false;
       fansOn = false;
       heaterDutyCycle = 0;
-      ledcWrite(HEATER_PWM_CHANNEL, 0);
+        digitalWrite(HEATER_SSR_PIN, LOW);
       digitalWrite(FAN_RELAY_PIN, LOW);
       Serial.print("IDLE MODE | Avg: ");
       Serial.print(averageTemp, 1);
@@ -496,7 +492,7 @@ void heaterSafetyCheck() {
     if (heaterOn) {
       heaterOn = false;
       heaterDutyCycle = 0;
-      ledcWrite(HEATER_PWM_CHANNEL, 0);
+        digitalWrite(HEATER_SSR_PIN, LOW);
       Serial.println("Heater DISABLED");
     }
     
@@ -513,7 +509,7 @@ void emergencyShutdown() {
   heaterOn = false;
   fansOn = false;
   heaterDutyCycle = 0;
-  ledcWrite(HEATER_PWM_CHANNEL, 0);
+  digitalWrite(HEATER_SSR_PIN, LOW);
   digitalWrite(FAN_RELAY_PIN, LOW);
   Serial.println("=== EMERGENCY SHUTDOWN ===");
 }
@@ -563,8 +559,8 @@ void updateDisplay() {
     }
     tft.print("Heat:");
     tft.print(heaterTemp, 1);
-    tft.print("C PWM:");
-    tft.println(heaterDutyCycle);
+    tft.print("C ");
+    tft.println(heaterOn ? "ON" : "OFF");
   } else {
     tft.setTextColor(ST77XX_RED);
     tft.println("Heat: FAULT");
@@ -712,7 +708,7 @@ String getHTMLPage() {
   
   html += "<div class='status " + String(heaterOn ? "on" : "off") + "'>Heater: " + String(heaterOn ? "ON" : "OFF") + "</div>";
   html += "<div class='status " + String(fansOn ? "on" : "off") + "'>Fans: " + String(fansOn ? "ON" : "OFF") + "</div>";
-  html += "<br><span class='label'>Heater PWM: " + String(heaterDutyCycle) + "/255 (" + String(map(heaterDutyCycle, 0, 255, 0, 100)) + "%)</span>";
+  html += "<br><span class='label'>Heater: " + String(heaterOn ? "ON" : "OFF") + "</span>";
   html += "</div>";
   
   // Temperature Card

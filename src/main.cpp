@@ -20,16 +20,13 @@ const char* ap_password = "xD8ro6rNdcxbMWy!P78H";
 #define COOLING_FAN_PIN 27     // GPIO for 5V DC cooling fan via transistor
 
 // TFT Display Pins (Hardware SPI)
-#define TFT_CS    5
-#define TFT_RST   17
-#define TFT_DC    2            // Changed from 16 (now used for heater sensor)
-#define TFT_SCLK  18           // SCK
-#define TFT_MOSI  23           // SDA/MOSI
+#define TFT_CS    5        //green
+#define TFT_RST   17       //white
+#define TFT_DC    2        //gray A0
+#define TFT_SCLK  18       //black  SCK
+#define TFT_MOSI  23       //yellow SDA/MOSI
 
-// PWM Configuration for Heater
-#define HEATER_PWM_CHANNEL 0
-#define HEATER_PWM_FREQ 1      // 1 Hz (slow for thermal mass)
-#define HEATER_PWM_RESOLUTION 8 // 0-255
+// Heater control is a simple ON/OFF digital output (GPIO 25)
 
 // Temperature Thresholds (now adjustable via web interface)
 float TEMP_MIN = 10.0;          // Turn on heating below this
@@ -83,7 +80,7 @@ bool fansOn = false;
 bool coolingFanOn = false;  // DC cooling fan state
 bool heaterSensorFault = false;
 bool airSensorFault = false;
-int heaterDutyCycle = 0; // 0-255 for PWM
+int heaterDutyCycle = 0; // 0 == OFF, 1 == ON (digital heater control)
 
 // Timing variables
 unsigned long lastAirTempRead = 0;
@@ -131,13 +128,12 @@ void setup() {
   pinMode(FAN_RELAY_PIN, OUTPUT);
   // pinMode(COOLING_FAN_PIN, OUTPUT);  // NOT IMPLEMENTED
   
-  // Setup PWM for heater
-  ledcSetup(HEATER_PWM_CHANNEL, HEATER_PWM_FREQ, HEATER_PWM_RESOLUTION);
-  ledcAttachPin(HEATER_SSR_PIN, HEATER_PWM_CHANNEL);
+  // Configure heater pin as a plain digital output (no PWM)
+  pinMode(HEATER_SSR_PIN, OUTPUT);
   
   // Ensure everything starts OFF (SAFETY)
   pinMode(COOLING_FAN_PIN, OUTPUT);
-  ledcWrite(HEATER_PWM_CHANNEL, 0);
+  digitalWrite(HEATER_SSR_PIN, LOW);
   digitalWrite(FAN_RELAY_PIN, LOW);
   digitalWrite(COOLING_FAN_PIN, LOW);
   Serial.println("All outputs initialized to SAFE state");
@@ -445,7 +441,7 @@ void controlSystem() {
       Serial.println("SAFETY: Cannot heat without valid heater sensor");
       heaterOn = false;
       heaterDutyCycle = 0;
-      ledcWrite(HEATER_PWM_CHANNEL, 0);
+      digitalWrite(HEATER_SSR_PIN, LOW);
       return;
     }
 
@@ -458,27 +454,23 @@ void controlSystem() {
       if (c < 5.0)  c = 5.0;
       if (c > 15.0) c = 15.0;
 
-      // Linear interpolation: 5..15 → 128..255
-      float ratio = (c - 5.0) / 10.0;  // 0..1
-      int pwm = (int)(128 + ratio * (255 - 128) + 0.5);
-      pwm = constrain(pwm, 0, 255);
-
-      heaterDutyCycle = pwm;
-      ledcWrite(HEATER_PWM_CHANNEL, heaterDutyCycle);
+      // Turn heater fully ON (digital) when heating required
+      heaterDutyCycle = 1; // 1 == ON, 0 == OFF (keeps UI/state compatibility)
+      digitalWrite(HEATER_SSR_PIN, HIGH);
       heaterOn = true;
 
     } else {
       // Too close to limit → turn off
       heaterOn = false;
       heaterDutyCycle = 0;
-      ledcWrite(HEATER_PWM_CHANNEL, 0);
+      digitalWrite(HEATER_SSR_PIN, LOW);
     }
 
     // Stop heating once target is reached + hysteresis
     if (averageTemp >= TEMP_TARGET + HYSTERESIS) {
       heaterOn = false;
       heaterDutyCycle = 0;
-      ledcWrite(HEATER_PWM_CHANNEL, 0);
+      digitalWrite(HEATER_SSR_PIN, LOW);
       fansOn = false;
       digitalWrite(FAN_RELAY_PIN, LOW);
       Serial.println("Heating target reached → Heater + Fans OFF");
@@ -496,7 +488,7 @@ void controlSystem() {
     if (heaterOn) {
       heaterOn = false;
       heaterDutyCycle = 0;
-      ledcWrite(HEATER_PWM_CHANNEL, 0);
+      digitalWrite(HEATER_SSR_PIN, LOW);
     }
 
     // Turn ON fans for cooling
@@ -527,7 +519,7 @@ void controlSystem() {
     fansOn = false;
     heaterDutyCycle = 0;
 
-    ledcWrite(HEATER_PWM_CHANNEL, 0);
+    digitalWrite(HEATER_SSR_PIN, LOW);
     digitalWrite(FAN_RELAY_PIN, LOW);
 
     Serial.print("IDLE MODE | Avg: ");
@@ -580,7 +572,7 @@ void heaterSafetyCheck() {
     if (heaterOn) {
       heaterOn = false;
       heaterDutyCycle = 0;
-      ledcWrite(HEATER_PWM_CHANNEL, 0);
+      digitalWrite(HEATER_SSR_PIN, LOW);
       Serial.println("Heater DISABLED");
     }
     
@@ -598,7 +590,7 @@ void emergencyShutdown() {
   fansOn = false;
   coolingFanOn = false;
   heaterDutyCycle = 0;
-  ledcWrite(HEATER_PWM_CHANNEL, 0);
+  digitalWrite(HEATER_SSR_PIN, LOW);
   digitalWrite(FAN_RELAY_PIN, LOW);
   digitalWrite(COOLING_FAN_PIN, LOW);
   Serial.println("=== EMERGENCY SHUTDOWN ===");
@@ -775,7 +767,7 @@ void handleStatusJSON() {
   json += "\"cooling_fan\":" + String(coolingFanOn ? "1" : "0") + ",";
   json += "\"heat_temp\":" + String(heaterTemp, 1) + ",";
   json += "\"internal_temp\":" + String(internalTemp, 1) + ",";
-  json += "\"pwm\":" + String(heaterDutyCycle) + ",";
+  // Heater duty is now binary (0/1). heaterOn is already provided in JSON.
   json += "\"temp_min\":" + String(TEMP_MIN, 1) + ",";
   json += "\"temp_max\":" + String(TEMP_MAX, 1) + ",";
   json += "\"heater_max\":" + String(HEATER_SAFETY_MAX, 1) + ",";
@@ -868,7 +860,6 @@ String getHTMLPage() {
   html += "document.getElementById('coolingState').textContent=(d.cooling_fan=='1')?'ON':'OFF';";
   html += "document.getElementById('heatTemp').textContent=(d.heat_temp>-100)?d.heat_temp.toFixed(1)+'C':'ERR';";
   html += "document.getElementById('internalTemp').textContent=(d.internal_temp>-100)?d.internal_temp.toFixed(1)+'C':'ERR';";
-  html += "document.getElementById('pwmVal').textContent=d.pwm+'/255';";
   html += "document.getElementById('tempMinVal').textContent=d.temp_min.toFixed(1)+'C';";
   html += "document.getElementById('tempMaxVal').textContent=d.temp_max.toFixed(1)+'C';";
   html += "document.getElementById('heaterMaxVal').textContent=d.heater_max.toFixed(1)+'C';";
@@ -907,7 +898,7 @@ String getHTMLPage() {
   html += "<div class='status " + String(coolingFanOn ? "on" : "off") + "'>";
   html += "Cooling Fan: <span id='coolingState'>" + String(coolingFanOn ? "ON" : "OFF") + "</span></div>";
 
-  html += "<br><span class='label'>Heater PWM: <span id='pwmVal'>" + String(heaterDutyCycle) + "/255</span></span>";
+  // Heater is now binary (ON/OFF) — status is shown above
   html += "</div>";
 
   // TEMPERATURE CARD
