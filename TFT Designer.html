@@ -1,0 +1,557 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ST7735 Layout Designer</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Courier New', monospace;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            color: #fff;
+            padding: 20px;
+            min-height: 100vh;
+        }
+        
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+        
+        h1 {
+            text-align: center;
+            color: #4CAF50;
+            margin-bottom: 10px;
+        }
+        
+        .subtitle {
+            text-align: center;
+            color: #aaa;
+            margin-bottom: 30px;
+            font-size: 14px;
+        }
+        
+        .main-grid {
+            display: grid;
+            grid-template-columns: 1fr auto;
+            gap: 30px;
+            align-items: start;
+        }
+        
+        .canvas-section {
+            background: rgba(42, 42, 42, 0.8);
+            padding: 30px;
+            border-radius: 15px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+        }
+        
+        .canvas-wrapper {
+            position: relative;
+            display: inline-block;
+            background: #000;
+            border: 3px solid #4CAF50;
+            border-radius: 8px;
+            box-shadow: 0 0 20px rgba(76, 175, 80, 0.3);
+        }
+        
+        #displayCanvas {
+            display: block;
+            cursor: crosshair;
+            image-rendering: pixelated;
+        }
+        
+        .coordinates {
+            position: absolute;
+            top: -30px;
+            right: 0;
+            background: rgba(76, 175, 80, 0.9);
+            color: #000;
+            padding: 5px 12px;
+            border-radius: 5px;
+            font-weight: bold;
+            font-size: 14px;
+        }
+        
+        .controls {
+            background: rgba(42, 42, 42, 0.8);
+            padding: 25px;
+            border-radius: 15px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+            min-width: 350px;
+        }
+        
+        h2 {
+            color: #4CAF50;
+            font-size: 1.3em;
+            margin-bottom: 20px;
+            border-bottom: 2px solid #4CAF50;
+            padding-bottom: 8px;
+        }
+        
+        .control-group {
+            margin-bottom: 20px;
+            padding: 15px;
+            background: rgba(51, 51, 51, 0.6);
+            border-radius: 10px;
+        }
+        
+        .control-group label {
+            display: block;
+            color: #aaa;
+            margin-bottom: 8px;
+            font-size: 13px;
+        }
+        
+        .control-group input[type="number"],
+        .control-group input[type="text"],
+        .control-group select {
+            width: 100%;
+            padding: 10px;
+            background: #1a1a1a;
+            border: 2px solid #555;
+            border-radius: 6px;
+            color: #fff;
+            font-family: 'Courier New', monospace;
+            font-size: 14px;
+        }
+        
+        .control-group input:focus,
+        .control-group select:focus {
+            outline: none;
+            border-color: #4CAF50;
+        }
+        
+        .color-picker-wrapper {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+        
+        .color-picker-wrapper input[type="color"] {
+            width: 60px;
+            height: 40px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+        }
+        
+        .color-presets {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 8px;
+            margin-top: 10px;
+        }
+        
+        .color-preset {
+            width: 100%;
+            height: 35px;
+            border: 2px solid #333;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        
+        .color-preset:hover {
+            transform: scale(1.1);
+            border-color: #4CAF50;
+        }
+        
+        .button-group {
+            display: flex;
+            gap: 10px;
+            margin-top: 15px;
+        }
+        
+        button {
+            flex: 1;
+            padding: 12px;
+            background: #4CAF50;
+            border: none;
+            border-radius: 8px;
+            color: #000;
+            font-weight: bold;
+            cursor: pointer;
+            transition: all 0.2s;
+            font-size: 14px;
+        }
+        
+        button:hover {
+            background: #45a049;
+            transform: translateY(-2px);
+        }
+        
+        button:active {
+            transform: translateY(0);
+        }
+        
+        .btn-secondary {
+            background: #666 !important;
+        }
+        
+        .btn-secondary:hover {
+            background: #777 !important;
+        }
+        
+        #codeOutput {
+            background: rgba(42, 42, 42, 0.8);
+            padding: 25px;
+            border-radius: 15px;
+            margin-top: 30px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+        }
+        
+        #generatedCode {
+            background: #1a1a1a;
+            padding: 20px;
+            border-radius: 8px;
+            border: 2px solid #4CAF50;
+            color: #4CAF50;
+            font-family: 'Courier New', monospace;
+            font-size: 13px;
+            white-space: pre-wrap;
+            overflow-x: auto;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        
+        .info-box {
+            background: rgba(76, 175, 80, 0.1);
+            border: 2px solid #4CAF50;
+            border-radius: 8px;
+            padding: 15px;
+            margin-top: 20px;
+            font-size: 12px;
+            line-height: 1.6;
+        }
+        
+        .info-box strong {
+            color: #4CAF50;
+        }
+        
+        @media (max-width: 1200px) {
+            .main-grid {
+                grid-template-columns: 1fr;
+            }
+            
+            .controls {
+                min-width: auto;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🖥️ ST7735 TFT Layout Designer</h1>
+        <div class="subtitle">160×128 Pixel Display in Landscape Mode</div>
+        
+        <div class="main-grid">
+            <div class="canvas-section">
+                <div class="canvas-wrapper">
+                    <div class="coordinates" id="coords">x: 0, y: 0</div>
+                    <canvas id="displayCanvas" width="160" height="128"></canvas>
+                </div>
+                
+                <div class="info-box">
+                    <strong>How to use:</strong><br>
+                    • Click anywhere on the display to place elements<br>
+                    • Hover to see exact pixel coordinates<br>
+                    • Add text, rectangles, or lines<br>
+                    • Generated C++ code appears below
+                </div>
+            </div>
+            
+            <div class="controls">
+                <h2>Add Element</h2>
+                
+                <div class="control-group">
+                    <label>Element Type:</label>
+                    <select id="elementType">
+                        <option value="text">Text</option>
+                        <option value="rect">Filled Rectangle</option>
+                        <option value="rectOutline">Rectangle Outline</option>
+                        <option value="line">Line</option>
+                    </select>
+                </div>
+                
+                <div class="control-group" id="textGroup">
+                    <label>Text Content:</label>
+                    <input type="text" id="textContent" value="Hello" placeholder="Enter text">
+                </div>
+                
+                <div class="control-group" id="textSizeGroup">
+                    <label>Text Size (1-3):</label>
+                    <input type="number" id="textSize" value="1" min="1" max="3">
+                </div>
+                
+                <div class="control-group">
+                    <label>X Position:</label>
+                    <input type="number" id="posX" value="10" min="0" max="159">
+                </div>
+                
+                <div class="control-group">
+                    <label>Y Position:</label>
+                    <input type="number" id="posY" value="10" min="0" max="127">
+                </div>
+                
+                <div class="control-group" id="dimensionsGroup" style="display:none;">
+                    <label>Width:</label>
+                    <input type="number" id="elemWidth" value="50" min="1" max="160">
+                    <label style="margin-top:10px;">Height:</label>
+                    <input type="number" id="elemHeight" value="20" min="1" max="128">
+                </div>
+                
+                <div class="control-group" id="lineGroup" style="display:none;">
+                    <label>End X:</label>
+                    <input type="number" id="endX" value="100" min="0" max="159">
+                    <label style="margin-top:10px;">End Y:</label>
+                    <input type="number" id="endY" value="10" min="0" max="127">
+                </div>
+                
+                <div class="control-group">
+                    <label>Color:</label>
+                    <div class="color-picker-wrapper">
+                        <input type="color" id="colorPicker" value="#ffffff">
+                        <select id="colorPreset">
+                            <option value="#FFFFFF">WHITE</option>
+                            <option value="#FF0000">RED</option>
+                            <option value="#00FF00">GREEN</option>
+                            <option value="#0000FF">BLUE</option>
+                            <option value="#FFFF00">YELLOW</option>
+                            <option value="#00FFFF">CYAN</option>
+                            <option value="#FF00FF">MAGENTA</option>
+                            <option value="#FFA500">ORANGE</option>
+                        </select>
+                    </div>
+                    <div class="color-presets">
+                        <div class="color-preset" style="background:#fff" data-color="#FFFFFF" title="WHITE"></div>
+                        <div class="color-preset" style="background:#f00" data-color="#FF0000" title="RED"></div>
+                        <div class="color-preset" style="background:#0f0" data-color="#00FF00" title="GREEN"></div>
+                        <div class="color-preset" style="background:#00f" data-color="#0000FF" title="BLUE"></div>
+                        <div class="color-preset" style="background:#ff0" data-color="#FFFF00" title="YELLOW"></div>
+                        <div class="color-preset" style="background:#0ff" data-color="#00FFFF" title="CYAN"></div>
+                        <div class="color-preset" style="background:#f0f" data-color="#FF00FF" title="MAGENTA"></div>
+                        <div class="color-preset" style="background:#ffa500" data-color="#FFA500" title="ORANGE"></div>
+                    </div>
+                </div>
+                
+                <div class="button-group">
+                    <button onclick="addElement()">Add Element</button>
+                    <button class="btn-secondary" onclick="clearCanvas()">Clear All</button>
+                </div>
+            </div>
+        </div>
+        
+        <div id="codeOutput">
+            <h2>Generated C++ Code</h2>
+            <div id="generatedCode">// Click "Add Element" to generate code
+// Your layout code will appear here</div>
+            <div class="button-group" style="margin-top:15px;">
+                <button onclick="copyCode()">📋 Copy Code</button>
+                <button class="btn-secondary" onclick="exportLayout()">💾 Save Layout</button>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        const canvas = document.getElementById('displayCanvas');
+        const ctx = canvas.getContext('2d');
+        const scale = 4; // Scale up for visibility
+        canvas.style.width = (160 * scale) + 'px';
+        canvas.style.height = (128 * scale) + 'px';
+        
+        let elements = [];
+        let codeLines = [];
+        
+        // Color mapping
+        const colorMap = {
+            '#FFFFFF': 'ST77XX_WHITE',
+            '#FF0000': 'ST77XX_RED',
+            '#00FF00': 'ST77XX_GREEN',
+            '#0000FF': 'ST77XX_BLUE',
+            '#FFFF00': 'ST77XX_YELLOW',
+            '#00FFFF': 'ST77XX_CYAN',
+            '#FF00FF': 'ST77XX_MAGENTA',
+            '#FFA500': 'ST77XX_ORANGE'
+        };
+        
+        // Initialize with grid
+        function drawGrid() {
+            ctx.fillStyle = '#000';
+            ctx.fillRect(0, 0, 160, 128);
+            
+            ctx.strokeStyle = '#222';
+            ctx.lineWidth = 0.5;
+            
+            // Draw grid lines every 10 pixels
+            for (let x = 0; x <= 160; x += 10) {
+                ctx.beginPath();
+                ctx.moveTo(x, 0);
+                ctx.lineTo(x, 128);
+                ctx.stroke();
+            }
+            
+            for (let y = 0; y <= 128; y += 10) {
+                ctx.beginPath();
+                ctx.moveTo(0, y);
+                ctx.lineTo(160, y);
+                ctx.stroke();
+            }
+            
+            // Draw border
+            ctx.strokeStyle = '#4CAF50';
+            ctx.lineWidth = 1;
+            ctx.strokeRect(0, 0, 160, 128);
+        }
+        
+        drawGrid();
+        
+        // Mouse tracking
+        canvas.addEventListener('mousemove', (e) => {
+            const rect = canvas.getBoundingClientRect();
+            const x = Math.floor((e.clientX - rect.left) / scale);
+            const y = Math.floor((e.clientY - rect.top) / scale);
+            document.getElementById('coords').textContent = `x: ${x}, y: ${y}`;
+        });
+        
+        // Click to set position
+        canvas.addEventListener('click', (e) => {
+            const rect = canvas.getBoundingClientRect();
+            const x = Math.floor((e.clientX - rect.left) / scale);
+            const y = Math.floor((e.clientY - rect.top) / scale);
+            document.getElementById('posX').value = x;
+            document.getElementById('posY').value = y;
+        });
+        
+        // Element type change
+        document.getElementById('elementType').addEventListener('change', (e) => {
+            const type = e.target.value;
+            document.getElementById('textGroup').style.display = type === 'text' ? 'block' : 'none';
+            document.getElementById('textSizeGroup').style.display = type === 'text' ? 'block' : 'none';
+            document.getElementById('dimensionsGroup').style.display = 
+                (type === 'rect' || type === 'rectOutline') ? 'block' : 'none';
+            document.getElementById('lineGroup').style.display = type === 'line' ? 'block' : 'none';
+        });
+        
+        // Color preset selection
+        document.querySelectorAll('.color-preset').forEach(preset => {
+            preset.addEventListener('click', (e) => {
+                const color = e.target.dataset.color;
+                document.getElementById('colorPicker').value = color;
+            });
+        });
+        
+        document.getElementById('colorPreset').addEventListener('change', (e) => {
+            document.getElementById('colorPicker').value = e.target.value;
+        });
+        
+        function addElement() {
+            const type = document.getElementById('elementType').value;
+            const x = parseInt(document.getElementById('posX').value);
+            const y = parseInt(document.getElementById('posY').value);
+            const color = document.getElementById('colorPicker').value.toUpperCase();
+            
+            const element = { type, x, y, color };
+            
+            if (type === 'text') {
+                element.text = document.getElementById('textContent').value;
+                element.size = parseInt(document.getElementById('textSize').value);
+            } else if (type === 'rect' || type === 'rectOutline') {
+                element.width = parseInt(document.getElementById('elemWidth').value);
+                element.height = parseInt(document.getElementById('elemHeight').value);
+            } else if (type === 'line') {
+                element.endX = parseInt(document.getElementById('endX').value);
+                element.endY = parseInt(document.getElementById('endY').value);
+            }
+            
+            elements.push(element);
+            redrawCanvas();
+            generateCode();
+        }
+        
+        function redrawCanvas() {
+            drawGrid();
+            
+            elements.forEach(elem => {
+                ctx.fillStyle = elem.color;
+                ctx.strokeStyle = elem.color;
+                
+                if (elem.type === 'text') {
+                    ctx.font = `${elem.size * 8}px monospace`;
+                    ctx.fillText(elem.text, elem.x, elem.y + elem.size * 7);
+                } else if (elem.type === 'rect') {
+                    ctx.fillRect(elem.x, elem.y, elem.width, elem.height);
+                } else if (elem.type === 'rectOutline') {
+                    ctx.strokeRect(elem.x, elem.y, elem.width, elem.height);
+                } else if (elem.type === 'line') {
+                    ctx.beginPath();
+                    ctx.moveTo(elem.x, elem.y);
+                    ctx.lineTo(elem.endX, elem.endY);
+                    ctx.stroke();
+                }
+            });
+        }
+        
+        function generateCode() {
+            let code = '// Generated TFT Display Code\n';
+            code += '// Add this to your updateDisplay() function:\n\n';
+            
+            elements.forEach((elem, i) => {
+                const colorName = colorMap[elem.color] || 'ST77XX_WHITE';
+                
+                if (elem.type === 'text') {
+                    code += `// Text element ${i + 1}\n`;
+                    code += `tft.setCursor(${elem.x}, ${elem.y});\n`;
+                    code += `tft.setTextSize(${elem.size});\n`;
+                    code += `tft.setTextColor(${colorName});\n`;
+                    code += `tft.print("${elem.text}");\n\n`;
+                } else if (elem.type === 'rect') {
+                    code += `// Filled rectangle ${i + 1}\n`;
+                    code += `tft.fillRect(${elem.x}, ${elem.y}, ${elem.width}, ${elem.height}, ${colorName});\n\n`;
+                } else if (elem.type === 'rectOutline') {
+                    code += `// Rectangle outline ${i + 1}\n`;
+                    code += `tft.drawRect(${elem.x}, ${elem.y}, ${elem.width}, ${elem.height}, ${colorName});\n\n`;
+                } else if (elem.type === 'line') {
+                    code += `// Line ${i + 1}\n`;
+                    code += `tft.drawLine(${elem.x}, ${elem.y}, ${elem.endX}, ${elem.endY}, ${colorName});\n\n`;
+                }
+            });
+            
+            document.getElementById('generatedCode').textContent = code || '// No elements added yet';
+        }
+        
+        function clearCanvas() {
+            if (confirm('Clear all elements?')) {
+                elements = [];
+                drawGrid();
+                generateCode();
+            }
+        }
+        
+        function copyCode() {
+            const code = document.getElementById('generatedCode').textContent;
+            navigator.clipboard.writeText(code).then(() => {
+                alert('Code copied to clipboard!');
+            });
+        }
+        
+        function exportLayout() {
+            const data = JSON.stringify(elements, null, 2);
+            const blob = new Blob([data], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'tft_layout.json';
+            a.click();
+        }
+        
+        // Initialize
+        generateCode();
+    </script>
+</body>
+</html>
