@@ -60,6 +60,12 @@ Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, TFT_RST);
 
 // Web Server
 WebServer server(80);
+float lastDisplayedAvg = -999.0;
+float lastDisplayedHeater = -999.0;
+bool lastHeaterState = false;
+bool lastFanState = false;
+bool lastFaultState = false;
+bool displayInitialized = false;
 
 // Sensor addresses and counts
 DeviceAddress leftSensorAddresses[3];
@@ -515,102 +521,139 @@ void emergencyShutdown() {
 }
 
 void updateDisplay() {
-  tft.fillScreen(ST77XX_BLACK);
-  tft.setCursor(0, 0);
-  tft.setTextSize(1);
-  
-  // Title
-  tft.setTextColor(ST77XX_GREEN);
-  tft.println("GREENHOUSE 3-BUS");
-  tft.print("Web: ");
-  tft.println(webServerIP);
-  tft.println("================");
-  
-  // Fault indicators
-  if (heaterSensorFault || airSensorFault) {
-    tft.setTextColor(ST77XX_RED);
-    tft.setTextSize(2);
-    tft.println("FAULT!");
+  // ========================================
+  // FIRST TIME ONLY - Draw static elements
+  // ========================================
+  if (!displayInitialized) {
+    tft.fillScreen(ST77XX_BLACK);
+    
+    // Header with box
+    tft.drawRect(0, 0, 160, 25, ST77XX_GREEN);
+    tft.setCursor(5, 3);
     tft.setTextSize(1);
-    if (heaterSensorFault) tft.println("Heater sensor");
-    if (airSensorFault) tft.println("Air sensors");
-    tft.println();
+    tft.setTextColor(ST77XX_GREEN);
+    tft.println("GREENHOUSE v4.1");
+    tft.setCursor(5, 13);
+    tft.setTextSize(1);
+    tft.setTextColor(ST77XX_WHITE);
+    tft.print("IP:");
+    tft.print(webServerIP);
+    
+    // Divider line
+    tft.drawLine(0, 26, 160, 26, ST77XX_BLUE);
+    
+    // Labels for data sections
+    tft.setCursor(5, 75);
+    tft.setTextColor(ST77XX_CYAN);
+    tft.print("Heater:");
+    
+    tft.setCursor(5, 95);
+    tft.setTextColor(ST77XX_WHITE);
+    tft.print("Status:");
+    
+    displayInitialized = true;
   }
   
-  // Average temperature (large)
-  tft.setTextSize(2);
-  if (averageTemp > -100) {
-    tft.setTextColor(ST77XX_YELLOW);
-    tft.print("Avg:");
-    tft.print(averageTemp, 1);
-    tft.println("C");
-  } else {
-    tft.setTextColor(ST77XX_RED);
-    tft.println("Avg: ERR");
-  }
-  
-  // Heater sensor temperature
-  tft.setTextSize(1);
-  if (heaterTemp > -100) {
-    if (heaterTemp >= HEATER_SAFETY_MAX - 3) {
+  // ========================================
+  // FAULT INDICATOR - Top priority
+  // ========================================
+  bool currentFaultState = (heaterSensorFault || airSensorFault);
+  if (currentFaultState != lastFaultState) {
+    tft.fillRect(5, 30, 150, 10, ST77XX_BLACK);
+    if (currentFaultState) {
+      tft.setCursor(5, 30);
+      tft.setTextSize(1);
       tft.setTextColor(ST77XX_RED);
-    } else if (heaterTemp >= HEATER_SAFETY_MAX - 5) {
-      tft.setTextColor(ST77XX_ORANGE);
-    } else {
-      tft.setTextColor(ST77XX_CYAN);
+      tft.print("FAULT: ");
+      if (heaterSensorFault) tft.print("HEATER ");
+      if (airSensorFault) tft.print("AIR");
     }
-    tft.print("Heat:");
-    tft.print(heaterTemp, 1);
-    tft.println("C");
-  } else {
-    tft.setTextColor(ST77XX_RED);
-    tft.println("Heat: FAULT");
+    lastFaultState = currentFaultState;
   }
   
-  // System status
-  tft.setTextColor(ST77XX_WHITE);
-  tft.println();
-  tft.print("HTR:");
-  tft.setTextColor(heaterOn ? ST77XX_RED : ST77XX_WHITE);
-  tft.print(heaterOn ? "ON " : "OFF");
-  
-  tft.setTextColor(ST77XX_WHITE);
-  tft.print(" FAN:");
-  tft.setTextColor(fansOn ? ST77XX_GREEN : ST77XX_WHITE);
-  tft.println(fansOn ? "ON" : "OFF");
-  
-  // Individual sensor readings
-  tft.setTextColor(ST77XX_BLUE);
-  tft.println();
-  tft.println("LEFT:");
-  for (int i = 0; i < numLeftSensors && i < 3; i++) {
-    tft.print("L");
-    tft.print(i);
-    tft.print(":");
-    if (leftTemperatures[i] > -100) {
-      tft.print(leftTemperatures[i], 1);
-    } else {
-      tft.setTextColor(ST77XX_RED);
-      tft.print("ERR");
-      tft.setTextColor(ST77XX_BLUE);
-    }
-    tft.print(" ");
-  }
-  
-  tft.println();
-  tft.println("RIGHT:");
-  for (int i = 0; i < numRightSensors && i < 3; i++) {
-    tft.print("R");
-    tft.print(i);
-    tft.print(":");
-    if (rightTemperatures[i] > -100) {
-      tft.print(rightTemperatures[i], 1);
+  // ========================================
+  // AVERAGE TEMPERATURE - Large Display
+  // ========================================
+  if (abs(averageTemp - lastDisplayedAvg) > 0.1 || averageTemp <= -100) {
+    // Clear area
+    tft.fillRect(5, 45, 150, 25, ST77XX_BLACK);
+    
+    tft.setCursor(5, 48);
+    tft.setTextSize(3);  // BIG!
+    
+    if (averageTemp > -100) {
+      // Color based on temperature range
+      if (averageTemp < TEMP_MIN) {
+        tft.setTextColor(ST77XX_CYAN);  // Cold - heating needed
+      } else if (averageTemp > TEMP_MAX) {
+        tft.setTextColor(ST77XX_RED);   // Hot - cooling needed
+      } else {
+        tft.setTextColor(ST77XX_GREEN); // Perfect range
+      }
+      
+      tft.print(averageTemp, 1);
+      tft.setTextSize(2);
+      tft.print("C");
     } else {
       tft.setTextColor(ST77XX_RED);
-      tft.print("ERR");
-      tft.setTextColor(ST77XX_BLUE);
+      tft.setTextSize(2);
+      tft.print("ERROR");
     }
-    tft.print(" ");
+    
+    lastDisplayedAvg = averageTemp;
+  }
+  
+  // ========================================
+  // HEATER SENSOR TEMPERATURE
+  // ========================================
+  if (abs(heaterTemp - lastDisplayedHeater) > 0.1) {
+    tft.fillRect(60, 75, 95, 10, ST77XX_BLACK);
+    
+    tft.setCursor(60, 75);
+    tft.setTextSize(1);
+    
+    if (heaterTemp > -100) {
+      // Color based on safety margins
+      if (heaterTemp >= HEATER_SAFETY_MAX - 2) {
+        tft.setTextColor(ST77XX_RED);
+      } else if (heaterTemp >= HEATER_SAFETY_MAX - 5) {
+        tft.setTextColor(ST77XX_ORANGE);
+      } else {
+        tft.setTextColor(ST77XX_YELLOW);
+      }
+      tft.print(heaterTemp, 1);
+      tft.print("C");
+    } else {
+      tft.setTextColor(ST77XX_RED);
+      tft.print("FAULT");
+    }
+    
+    lastDisplayedHeater = heaterTemp;
+  }
+  
+  // ========================================
+  // STATUS INDICATORS with boxes
+  // ========================================
+  if (heaterOn != lastHeaterState || fansOn != lastFanState) {
+    tft.fillRect(5, 105, 150, 20, ST77XX_BLACK);
+    
+    // Heater status box
+    tft.drawRect(5, 105, 70, 18, heaterOn ? ST77XX_RED : ST77XX_WHITE);
+    tft.setCursor(15, 109);
+    tft.setTextSize(1);
+    tft.setTextColor(heaterOn ? ST77XX_RED : ST77XX_WHITE);
+    tft.print("HEAT:");
+    tft.print(heaterOn ? "ON" : "OFF");
+    
+    // Fan status box
+    tft.drawRect(85, 105, 70, 18, fansOn ? ST77XX_GREEN : ST77XX_WHITE);
+    tft.setCursor(95, 109);
+    tft.setTextColor(fansOn ? ST77XX_GREEN : ST77XX_WHITE);
+    tft.print("FAN:");
+    tft.print(fansOn ? "ON" : "OFF");
+    
+    lastHeaterState = heaterOn;
+    lastFanState = fansOn;
   }
 }
 
