@@ -55,7 +55,6 @@ float HEATER_CRITICAL_MAX = 50.0;   // Fan temperature limit (AC outdoor unit ra
 #define HYSTERESIS 0.5              // Temperature deadband
 #define MODE_CHANGE_HYSTERESIS 1.0  // Extra hysteresis to prevent mode oscillation
 #define HEATING_TARGET_OFFSET 2.0   // Heat until TEMP_MIN + this offset (prevents short cycling)
-#define MAX_TEMP_CHANGE_PER_CYCLE 5.0  // Max C change between readings (spike filter)
 
 // ============================================================================
 // SAFETY TIMERS - PREVENT RUNAWAY CONDITIONS
@@ -103,14 +102,11 @@ int numLeftSensors = 0;
 int numRightSensors = 0;
 bool heaterSensorDetected = false;
 
-// Temperature readings with validation
+// Temperature readings
 float leftTemperatures[3] = {-127.0, -127.0, -127.0};
 float rightTemperatures[3] = {-127.0, -127.0, -127.0};
-float prevLeftTemperatures[3] = {-127.0, -127.0, -127.0};
-float prevRightTemperatures[3] = {-127.0, -127.0, -127.0};
 float averageTemp = -127.0;
 float heaterTemp = -127.0;
-float prevHeaterTemp = -127.0;
 
 // ============================================================================
 // SYSTEM STATE TRACKING
@@ -333,6 +329,7 @@ void setup() {
   server.on("/status", handleStatusJSON);
   server.on("/stats", handleStats);
   server.on("/reset", handleReset);
+  server.on("/resetstats", handleResetStats);
   server.begin();
   Serial.println(F("✓ Web server started"));
   
@@ -427,57 +424,41 @@ void readHeaterTemperature() {
     heaterTemp = -127.0;
     return;
   }
-  
+
   heaterSensor.requestTemperatures();
   float temp = heaterSensor.getTempC(heaterSensorAddress);
-  
-  // Validate reading
+
+  // Check if reading is valid
   if (temp == DEVICE_DISCONNECTED_C || temp < -50 || temp > 100) {
     Serial.println(F("⚠ HEATER SENSOR READ ERROR"));
-    
-    // Grace period for transient errors
+    heaterTemp = -127.0;
+
+    // Grace period before shutdown
     if (lastSensorFailureTime == 0) {
       lastSensorFailureTime = millis();
-      return;  // First error - give it time
-    } else if (millis() - lastSensorFailureTime < SENSOR_FAILURE_GRACE_PERIOD) {
-      return;  // Still within grace period
+    } else if (millis() - lastSensorFailureTime >= SENSOR_FAILURE_GRACE_PERIOD) {
+      safetyShutdown("Heater sensor failure");
     }
-    
-    heaterTemp = -127.0;
-    safetyShutdown("Heater sensor failure");
     return;
   }
-  
+
   // Reset grace period on successful read
   lastSensorFailureTime = 0;
-  
-  // Rate of change validation (spike filter)
-  if (prevHeaterTemp > -100) {
-    float change = abs(temp - prevHeaterTemp);
-    if (change > MAX_TEMP_CHANGE_PER_CYCLE) {
-      Serial.print(F("⚠ Heater sensor spike rejected: "));
-      Serial.print(change, 1);
-      Serial.println(F("C"));
-      return;  // Keep previous reading
-    }
-  }
-  
-  prevHeaterTemp = heaterTemp;
+
+  // Update temperature - trust the sensor
   heaterTemp = temp;
-  
-  // CRITICAL SAFETY CHECK - Immediate shutdown
+
+  // Safety checks
   if (heaterTemp >= HEATER_CRITICAL_MAX) {
     Serial.print(F("🚨 CRITICAL: Heater temp "));
     Serial.print(heaterTemp, 1);
     Serial.println(F("C - FAN LIMIT EXCEEDED"));
     safetyShutdown("Heater critical temperature");
-  } else if (heaterTemp >= HEATER_SAFETY_MAX) {
+  } else if (heaterTemp >= HEATER_SAFETY_MAX && heaterOn) {
     Serial.print(F("⚠ WARNING: Heater temp "));
     Serial.print(heaterTemp, 1);
     Serial.println(F("C - Safety limit reached"));
-    if (heaterOn) {
-      safetyShutdown("Heater safety temperature exceeded");
-    }
+    safetyShutdown("Heater safety temperature exceeded");
   }
 }
 
@@ -489,36 +470,20 @@ void readAirTemperatures() {
   leftSensors.requestTemperatures();
   for (int i = 0; i < numLeftSensors && i < 3; i++) {
     float temp = leftSensors.getTempC(leftSensorAddresses[i]);
-    
+
     if (temp != DEVICE_DISCONNECTED_C && temp > -50 && temp < 60) {
-      // Rate of change check
-      if (prevLeftTemperatures[i] > -100) {
-        float change = abs(temp - prevLeftTemperatures[i]);
-        if (change > MAX_TEMP_CHANGE_PER_CYCLE) {
-          continue;  // Skip spike
-        }
-      }
-      prevLeftTemperatures[i] = leftTemperatures[i];
       leftTemperatures[i] = temp;
     } else {
       leftTemperatures[i] = -127.0;
     }
   }
-  
+
   // Read RIGHT sensors
   rightSensors.requestTemperatures();
   for (int i = 0; i < numRightSensors && i < 3; i++) {
     float temp = rightSensors.getTempC(rightSensorAddresses[i]);
-    
+
     if (temp != DEVICE_DISCONNECTED_C && temp > -50 && temp < 60) {
-      // Rate of change check
-      if (prevRightTemperatures[i] > -100) {
-        float change = abs(temp - prevRightTemperatures[i]);
-        if (change > MAX_TEMP_CHANGE_PER_CYCLE) {
-          continue;  // Skip spike
-        }
-      }
-      prevRightTemperatures[i] = rightTemperatures[i];
       rightTemperatures[i] = temp;
     } else {
       rightTemperatures[i] = -127.0;
@@ -876,7 +841,7 @@ void updateDisplay() {
   float dispLeftTemps[3], dispRightTemps[3];
   int dispNumLeft, dispNumRight;
   float dispTempMin, dispTempMax;
-  SystemMode dispMode;
+  unsigned long dispTotalHeaterRuntime;
 
   if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
     dispAvgTemp = averageTemp;
@@ -890,7 +855,7 @@ void updateDisplay() {
     dispNumRight = numRightSensors;
     dispTempMin = TEMP_MIN;
     dispTempMax = TEMP_MAX;
-    dispMode = currentMode;
+    dispTotalHeaterRuntime = stats.totalHeaterRuntime / 1000;
     for (int i = 0; i < 3; i++) {
       dispLeftTemps[i] = leftTemperatures[i];
       dispRightTemps[i] = rightTemperatures[i];
@@ -939,7 +904,9 @@ void updateDisplay() {
   if (abs(dispAvgTemp - lastDisplayedAvg) > 0.1 || dispFault) {
     tft.fillRect(0, 40, 160, 20, ST77XX_BLACK);
     tft.setCursor(1, 40);
-    tft.setTextSize(2);
+    tft.setTextSize(1);
+    tft.setTextColor(ST77XX_WHITE);
+    tft.print(F("Avrg Temp: "));
 
     if (dispAvgTemp > -100) {
       if (dispAvgTemp < dispTempMin) {
@@ -959,23 +926,32 @@ void updateDisplay() {
   }
 
   // Heater status
-  tft.fillRect(0, 65, 160, 12, ST77XX_BLACK);
-  tft.setCursor(2, 65);
+  tft.fillRect(0, 55, 160, 12, ST77XX_BLACK);
+  tft.setCursor(2, 55);
   tft.setTextSize(1);
   tft.setTextColor(ST77XX_RED);
   if (dispHeaterTemp > -100) {
-    tft.print(F("H:"));
+    tft.print(F("Heater:"));
     tft.print(dispHeaterTemp, 1);
     tft.print(F("C "));
+    tft.print(dispHeaterOn ? F("ON") : F("OFF"));
   } else {
-    tft.print(F("H:ERR "));
+    tft.print(F("Heater:ERR"));
   }
-  tft.print(dispHeaterOn ? F("ON") : F("OFF"));
+
+  // Heating hours
+  tft.fillRect(0, 68, 160, 12, ST77XX_BLACK);
+  tft.setCursor(2, 68);
+  tft.setTextSize(1);
+  tft.setTextColor(ST77XX_RED);
+  tft.print(F("Heating:"));
+  tft.print(dispTotalHeaterRuntime / 3600);
+  tft.print(F("h"));
 
   // Fan status
-  tft.fillRect(0, 80, 160, 12, ST77XX_BLACK);
-  tft.setCursor(2, 80);
-  tft.setTextColor(ST77XX_WHITE);
+  tft.fillRect(0, 83, 160, 12, ST77XX_BLACK);
+  tft.setCursor(2, 83);
+  tft.setTextColor(ST77XX_GREEN);
   tft.print(F("Fan: "));
   tft.print(dispFansOn ? F("ON") : F("OFF"));
   if (dispInCooldown) {
@@ -984,8 +960,8 @@ void updateDisplay() {
   }
 
   // Sensor values
-  tft.fillRect(0, 95, 160, 33, ST77XX_BLACK);
-  tft.setCursor(2, 95);
+  tft.fillRect(0, 98, 160, 30, ST77XX_BLACK);
+  tft.setCursor(2, 98);
   tft.setTextColor(ST77XX_CYAN);
 
   for (int i = 0; i < dispNumLeft && i < 3; i++) {
@@ -997,7 +973,7 @@ void updateDisplay() {
     }
   }
 
-  tft.setCursor(2, 107);
+  tft.setCursor(2, 110);
   for (int i = 0; i < dispNumRight && i < 3; i++) {
     if (dispRightTemps[i] > -100) {
       tft.print(dispRightTemps[i], 1);
@@ -1006,15 +982,6 @@ void updateDisplay() {
       tft.print(F("-- "));
     }
   }
-  
-  // Runtime indicator (bottom line)
-  tft.setCursor(2, 120);
-  tft.setTextSize(1);
-  tft.setTextColor(ST77XX_GREEN);
-  unsigned long uptime = millis() / 1000;
-  tft.print(F("Up:"));
-  tft.print(uptime / 3600);
-  tft.print(F("h"));
 }
 
 // ============================================================================
@@ -1031,7 +998,7 @@ void handleRoot() {
   String safeFaultReason;
   float safeLeftTemps[3], safeRightTemps[3];
   int safeNumLeft, safeNumRight;
-  unsigned long safeUptime, safeTotalCycles, safeTotalRuntime;
+  unsigned long safeTotalCycles, safeTotalRuntime;
 
   if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
     safeAvgTemp = averageTemp;
@@ -1047,7 +1014,6 @@ void handleRoot() {
     safeFaultReason = faultReason;
     safeNumLeft = numLeftSensors;
     safeNumRight = numRightSensors;
-    safeUptime = millis() / 1000;
     safeTotalCycles = stats.totalHeatingCycles;
     safeTotalRuntime = stats.totalHeaterRuntime / 1000;
     for (int i = 0; i < 3; i++) {
@@ -1161,23 +1127,17 @@ void handleRoot() {
   html += F("' id='fansState'>Fans: ");
   html += safeFansOn ? F("ON") : F("OFF");
   html += F("</div>");
-  
-  html += F("<div class='info-row'><span class='info-label'>Uptime:</span><span class='info-value'>");
-  html += String(safeUptime / 3600);
-  html += F("h ");
-  html += String((safeUptime % 3600) / 60);
-  html += F("m</span></div>");
-  
+
   html += F("<div class='info-row'><span class='info-label'>Total Heating Cycles:</span><span class='info-value'>");
   html += String(safeTotalCycles);
   html += F("</span></div>");
-  
+
   html += F("<div class='info-row'><span class='info-label'>Total Heater Runtime:</span><span class='info-value'>");
   html += String(safeTotalRuntime / 3600);
   html += F("h ");
   html += String((safeTotalRuntime % 3600) / 60);
   html += F("m</span></div>");
-  
+
   html += F("</div>");
 
   html += F("<div class='card'><h2>Temperatures</h2>"
@@ -1319,7 +1279,6 @@ void handleStatusJSON() {
     doc["heater_max"] = HEATER_SAFETY_MAX;
     doc["fault"] = systemFault;
     doc["fault_reason"] = faultReason;
-    doc["uptime"] = millis() / 1000;
 
     JsonArray left = doc.createNestedArray("left");
     for (int i = 0; i < numLeftSensors && i < 3; i++) {
@@ -1384,6 +1343,10 @@ void handleStats() {
     html += String(totalMinutes);
     html += F("m</span></div>");
 
+    html += F("<div class='stat'><span class='label'>Heating Hours:</span><span class='value'>");
+    html += String(totalHours);
+    html += F("h</span></div>");
+
     html += F("<div class='stat'><span class='label'>Min Temperature:</span><span class='value'>");
     html += String(stats.minTempRecorded, 1);
     html += F("C</span></div>");
@@ -1396,18 +1359,12 @@ void handleStats() {
     html += String(stats.safetyShutdownCount);
     html += F("</span></div>");
 
-    html += F("<div class='stat'><span class='label'>System Uptime:</span><span class='value'>");
-    unsigned long uptime = (millis() - stats.lastResetTime) / 1000;
-    html += String(uptime / 3600);
-    html += F("h ");
-    html += String((uptime % 3600) / 60);
-    html += F("m</span></div>");
-
     xSemaphoreGive(dataMutex);
   }
 
   html += F("</div>"
     "<button class='btn' onclick='location.href=\"/\"'>Back to Control</button>"
+    "<button class='btn' style='background:#dc3545;margin-top:10px;' onclick='if(confirm(\"Are you sure you want to reset all statistics? This cannot be undone.\")) location.href=\"/resetstats\"'>Reset Statistics</button>"
     "</div></body></html>");
 
   server.send(200, F("text/html"), html);
@@ -1423,6 +1380,31 @@ void handleReset() {
   }
 
   server.sendHeader(F("Location"), F("/"));
+  server.send(303);
+}
+
+// ============================================================================
+// WEB SERVER - RESET STATISTICS
+// ============================================================================
+void handleResetStats() {
+  if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+    // Reset all statistics to defaults
+    stats.totalHeatingCycles = 0;
+    stats.totalCoolingCycles = 0;
+    stats.totalHeaterRuntime = 0;
+    stats.safetyShutdownCount = 0;
+    stats.minTempRecorded = 999.0;
+    stats.maxTempRecorded = -999.0;
+
+    // Save to EEPROM
+    saveSettings();
+
+    xSemaphoreGive(dataMutex);
+
+    Serial.println(F("📊 Statistics reset to defaults"));
+  }
+
+  server.sendHeader(F("Location"), F("/stats"));
   server.send(303);
 }
 
