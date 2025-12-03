@@ -7,6 +7,8 @@
 #include <WebServer.h>
 #include <ArduinoJson.h>
 #include <esp_task_wdt.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 
 // WiFi Credentials (Access Point Mode)
 const char* ap_ssid = "Green";
@@ -33,11 +35,13 @@ float TEMP_MAX = 25.0;
 float HEATER_SAFETY_MAX = 35.0;
 #define HYSTERESIS 0.5
 #define MAX_TEMP_CHANGE_PER_CYCLE 5.0  // Max °C change between readings
+#define MODE_CHANGE_HYSTERESIS 1.0     // Extra hysteresis to prevent mode switching
 
 // Timing
 #define AIR_TEMP_READ_INTERVAL 5000
 #define HEATER_TEMP_READ_INTERVAL 1000
 #define DISPLAY_UPDATE_INTERVAL 2000
+#define FAN_COOLDOWN_TIME 45000        // Keep fans on 45s after heater off
 
 // Setup OneWire buses
 OneWire leftSensorsBus(LEFT_SENSORS_BUS);
@@ -72,13 +76,28 @@ float prevHeaterTemp = -127.0;
 // System state
 bool heaterOn = false;
 bool fansOn = false;
+unsigned long heaterOffTime = 0;       // Track when heater was turned off
+unsigned long fanCooldownStart = 0;    // Track fan cooldown period
+bool inCooldownMode = false;           // Flag for post-heating cooldown
+
+// System mode tracking (for hysteresis)
+enum SystemMode {
+  MODE_IDLE,
+  MODE_HEATING,
+  MODE_COOLING,
+  MODE_COOLDOWN
+};
+SystemMode currentMode = MODE_IDLE;
+
+// Mutex for thread-safe access to shared variables
+SemaphoreHandle_t dataMutex;
 
 // Display state tracking
 bool displayInitialized = false;
 float lastDisplayedAvg = -999.0;
 String webServerIP = "192.168.4.1";
 
-// Timing
+// Timing - Initialize to current time to avoid millis overflow issues
 unsigned long lastAirTempRead = 0;
 unsigned long lastHeaterTempRead = 0;
 unsigned long lastDisplayUpdate = 0;
@@ -97,20 +116,29 @@ void handleStatusJSON();
 void setup() {
   Serial.begin(115200);
   delay(1000);
-  
-  Serial.println(F("\n=== GREENHOUSE CONTROLLER v4.2 ==="));
-  
+
+  Serial.println(F("\n=== GREENHOUSE CONTROLLER v4.3 ==="));
+
+  // Create mutex for thread-safe data access
+  dataMutex = xSemaphoreCreateMutex();
+
   // Initialize outputs to SAFE state
   pinMode(HEATER_SSR_PIN, OUTPUT);
   pinMode(FAN_RELAY_PIN, OUTPUT);
   digitalWrite(HEATER_SSR_PIN, LOW);
   digitalWrite(FAN_RELAY_PIN, LOW);
-  
-  // Configure watchdog
-  esp_task_wdt_init(30, true);
+
+  // Configure watchdog with shorter timeout for better safety
+  esp_task_wdt_init(15, true);
   esp_task_wdt_add(NULL);
-  
+
   Serial.println(F("Safety: All outputs OFF"));
+
+  // Initialize timing variables to current millis to prevent overflow issues
+  unsigned long now = millis();
+  lastAirTempRead = now;
+  lastHeaterTempRead = now;
+  lastDisplayUpdate = now;
   
   // Initialize LEFT sensors
   Serial.println(F("\n[Bus 1] LEFT sensors (GPIO 4)"));
@@ -171,7 +199,7 @@ void setup() {
   tft.setTextColor(ST77XX_WHITE);
   tft.setTextSize(1);
   tft.setCursor(0, 0);
-  tft.println(F("Greenhouse v4.2"));
+  tft.println(F("Greenhouse v4.3"));
   tft.print(F("L:"));
   tft.print(numLeftSensors);
   tft.print(F(" R:"));
@@ -204,30 +232,48 @@ void setup() {
 
 void loop() {
   unsigned long currentMillis = millis();
-  
-  esp_task_wdt_reset();
+
+  // Handle web server requests (brief, non-blocking)
   server.handleClient();
-  
-  // Read heater temp frequently (SAFETY)
+
+  // Read heater temp frequently (SAFETY CRITICAL)
   if (currentMillis - lastHeaterTempRead >= HEATER_TEMP_READ_INTERVAL) {
     lastHeaterTempRead = currentMillis;
-    readHeaterTemperature();
+
+    if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+      readHeaterTemperature();
+      xSemaphoreGive(dataMutex);
+    }
+
+    // Reset watchdog after critical safety check
+    esp_task_wdt_reset();
   }
-  
+
   // Read air temps less frequently
   if (currentMillis - lastAirTempRead >= AIR_TEMP_READ_INTERVAL) {
     lastAirTempRead = currentMillis;
-    readAirTemperatures();
-    calculateAverage();
-    controlSystem();
+
+    if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+      readAirTemperatures();
+      calculateAverage();
+      controlSystem();
+      xSemaphoreGive(dataMutex);
+    }
+
+    // Reset watchdog after control logic
+    esp_task_wdt_reset();
   }
-  
-  // Update display
+
+  // Update display (can be slow, don't hold mutex too long)
   if (currentMillis - lastDisplayUpdate >= DISPLAY_UPDATE_INTERVAL) {
     lastDisplayUpdate = currentMillis;
     updateDisplay();
+
+    // Reset watchdog after display update
+    esp_task_wdt_reset();
   }
-  
+
+  // Small delay to prevent tight looping
   delay(10);
 }
 
@@ -340,97 +386,208 @@ void calculateAverage() {
 }
 
 void controlSystem() {
+  unsigned long currentMillis = millis();
   TEMP_TARGET = TEMP_MIN + 2.0;
-  
+
   // SAFETY CHECK: Cannot operate without valid sensors
   if (averageTemp <= -100.0 || heaterTemp <= -100.0 || !heaterSensorDetected) {
     if (heaterOn || fansOn) {
       safetyShutdown();
+      currentMode = MODE_IDLE;
     }
     return;
   }
-  
-  // HEATING MODE
-  if (averageTemp < TEMP_MIN) {
-    // CRITICAL: Fans MUST be on before heater
-    if (!fansOn) {
-      fansOn = true;
-      digitalWrite(FAN_RELAY_PIN, HIGH);
-      Serial.println(F("Fans ON (heating prep)"));
-      delay(100); // Let fans start
-    }
-    
-    // CRITICAL: Only turn on heater if ALL conditions safe
-    if (!heaterOn && 
-        heaterTemp > 0 && 
-        heaterTemp < HEATER_SAFETY_MAX - 2.0 && 
-        fansOn) {
-      heaterOn = true;
-      digitalWrite(HEATER_SSR_PIN, HIGH);
-      Serial.print(F("HEATING: Avg="));
-      Serial.print(averageTemp, 1);
-      Serial.print(F("C Heater="));
-      Serial.print(heaterTemp, 1);
-      Serial.println(F("C"));
-    }
-    
-    // Stop heating when target reached
-    if (averageTemp >= TEMP_TARGET + HYSTERESIS) {
-      if (heaterOn || fansOn) {
-        heaterOn = false;
-        fansOn = false;
-        digitalWrite(HEATER_SSR_PIN, LOW);
-        digitalWrite(FAN_RELAY_PIN, LOW);
-        Serial.println(F("Target reached - OFF"));
-      }
-    }
-    return;
-  }
-  
-  // COOLING MODE
-  if (averageTemp > TEMP_MAX) {
+
+  // CRITICAL: Handle fan cooldown period after heating
+  if (inCooldownMode) {
+    unsigned long cooldownElapsed = currentMillis - fanCooldownStart;
+
+    // Keep heater OFF during cooldown
     if (heaterOn) {
       heaterOn = false;
       digitalWrite(HEATER_SSR_PIN, LOW);
+      Serial.println(F("Heater OFF (cooldown)"));
     }
-    
+
+    // Continue running fans during cooldown
     if (!fansOn) {
       fansOn = true;
       digitalWrite(FAN_RELAY_PIN, HIGH);
-      Serial.print(F("COOLING: "));
-      Serial.print(averageTemp, 1);
-      Serial.println(F("C"));
+      Serial.println(F("Fans ON (cooldown)"));
     }
-    
-    if (averageTemp <= TEMP_MAX - HYSTERESIS) {
+
+    // Check if cooldown is complete
+    if (cooldownElapsed >= FAN_COOLDOWN_TIME) {
+      inCooldownMode = false;
       fansOn = false;
       digitalWrite(FAN_RELAY_PIN, LOW);
-      Serial.println(F("Cooling complete"));
+      currentMode = MODE_IDLE;
+      Serial.println(F("Cooldown complete - System IDLE"));
     }
+
+    // Emergency: If temp gets too high during cooldown, enter cooling mode
+    if (averageTemp > TEMP_MAX + MODE_CHANGE_HYSTERESIS) {
+      inCooldownMode = false;
+      currentMode = MODE_COOLING;
+      Serial.println(F("Cooldown aborted - Switching to COOLING"));
+    }
+
     return;
   }
-  
-  // IDLE MODE
-  if (heaterOn || fansOn) {
-    heaterOn = false;
-    fansOn = false;
-    digitalWrite(HEATER_SSR_PIN, LOW);
-    digitalWrite(FAN_RELAY_PIN, LOW);
-    Serial.print(F("IDLE: "));
-    Serial.print(averageTemp, 1);
-    Serial.println(F("C"));
+
+  // Determine what mode we should be in based on temperature with hysteresis
+  SystemMode targetMode = MODE_IDLE;
+
+  if (averageTemp < TEMP_MIN - (currentMode == MODE_HEATING ? 0 : MODE_CHANGE_HYSTERESIS)) {
+    targetMode = MODE_HEATING;
+  } else if (averageTemp > TEMP_MAX + (currentMode == MODE_COOLING ? 0 : MODE_CHANGE_HYSTERESIS)) {
+    targetMode = MODE_COOLING;
+  } else if (averageTemp >= TEMP_TARGET + HYSTERESIS && currentMode == MODE_HEATING) {
+    // Heating target reached - enter cooldown
+    targetMode = MODE_COOLDOWN;
+  } else if (averageTemp <= TEMP_MAX - HYSTERESIS && currentMode == MODE_COOLING) {
+    // Cooling target reached
+    targetMode = MODE_IDLE;
+  } else {
+    // Stay in current mode if within hysteresis range
+    targetMode = currentMode;
+  }
+
+  // Handle mode transitions
+  if (targetMode != currentMode) {
+    Serial.print(F("Mode change: "));
+    Serial.print(currentMode);
+    Serial.print(F(" -> "));
+    Serial.println(targetMode);
+  }
+
+  // Execute control logic based on target mode
+  switch (targetMode) {
+    case MODE_HEATING:
+      // CRITICAL: Fans MUST be on before heater
+      if (!fansOn) {
+        fansOn = true;
+        digitalWrite(FAN_RELAY_PIN, HIGH);
+        Serial.println(F("Fans ON (heating prep)"));
+        delay(100); // Let fans start spinning
+      }
+
+      // CRITICAL: Only turn on heater if ALL conditions safe
+      if (!heaterOn &&
+          heaterTemp > 0 &&
+          heaterTemp < HEATER_SAFETY_MAX - 2.0 &&
+          fansOn) {
+        heaterOn = true;
+        digitalWrite(HEATER_SSR_PIN, HIGH);
+        Serial.print(F("Heater ON: Avg="));
+        Serial.print(averageTemp, 1);
+        Serial.print(F("C Heater="));
+        Serial.print(heaterTemp, 1);
+        Serial.println(F("C"));
+      }
+      currentMode = MODE_HEATING;
+      break;
+
+    case MODE_COOLING:
+      // Turn off heater if it's on
+      if (heaterOn) {
+        heaterOn = false;
+        digitalWrite(HEATER_SSR_PIN, LOW);
+        Serial.println(F("Heater OFF (cooling mode)"));
+      }
+
+      // Turn on fans for cooling
+      if (!fansOn) {
+        fansOn = true;
+        digitalWrite(FAN_RELAY_PIN, HIGH);
+        Serial.print(F("COOLING: "));
+        Serial.print(averageTemp, 1);
+        Serial.println(F("C"));
+        delay(50); // Brief delay for fan startup
+      }
+      currentMode = MODE_COOLING;
+      break;
+
+    case MODE_COOLDOWN:
+      // Enter cooldown mode - heater off, fans stay on
+      if (heaterOn) {
+        heaterOn = false;
+        digitalWrite(HEATER_SSR_PIN, LOW);
+        heaterOffTime = currentMillis;
+        Serial.println(F("Heater OFF - Starting cooldown"));
+      }
+
+      inCooldownMode = true;
+      fanCooldownStart = currentMillis;
+      currentMode = MODE_COOLDOWN;
+      Serial.print(F("COOLDOWN started ("));
+      Serial.print(FAN_COOLDOWN_TIME / 1000);
+      Serial.println(F("s)"));
+      break;
+
+    case MODE_IDLE:
+      // Turn everything off
+      if (heaterOn) {
+        heaterOn = false;
+        digitalWrite(HEATER_SSR_PIN, LOW);
+        Serial.println(F("Heater OFF (idle)"));
+      }
+      if (fansOn) {
+        fansOn = false;
+        digitalWrite(FAN_RELAY_PIN, LOW);
+        Serial.println(F("Fans OFF (idle)"));
+      }
+      if (currentMode != MODE_IDLE) {
+        Serial.print(F("IDLE: "));
+        Serial.print(averageTemp, 1);
+        Serial.println(F("C"));
+      }
+      currentMode = MODE_IDLE;
+      break;
   }
 }
 
 void safetyShutdown() {
   heaterOn = false;
   fansOn = false;
+  inCooldownMode = false;
   digitalWrite(HEATER_SSR_PIN, LOW);
   digitalWrite(FAN_RELAY_PIN, LOW);
+  currentMode = MODE_IDLE;
   Serial.println(F("=== SAFETY SHUTDOWN ==="));
 }
 
 void updateDisplay() {
+  // Make a thread-safe copy of display data
+  float dispAvgTemp, dispHeaterTemp;
+  bool dispHeaterOn, dispFansOn, dispHeaterDetected, dispInCooldown;
+  float dispLeftTemps[3], dispRightTemps[3];
+  int dispNumLeft, dispNumRight;
+  float dispTempMin, dispTempMax;
+  SystemMode dispMode;
+
+  if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+    dispAvgTemp = averageTemp;
+    dispHeaterTemp = heaterTemp;
+    dispHeaterOn = heaterOn;
+    dispFansOn = fansOn;
+    dispHeaterDetected = heaterSensorDetected;
+    dispInCooldown = inCooldownMode;
+    dispNumLeft = numLeftSensors;
+    dispNumRight = numRightSensors;
+    dispTempMin = TEMP_MIN;
+    dispTempMax = TEMP_MAX;
+    dispMode = currentMode;
+    for (int i = 0; i < 3; i++) {
+      dispLeftTemps[i] = leftTemperatures[i];
+      dispRightTemps[i] = rightTemperatures[i];
+    }
+    xSemaphoreGive(dataMutex);
+  } else {
+    // Skip this display update if we can't get the mutex
+    return;
+  }
+
   if (!displayInitialized) {
     tft.fillScreen(ST77XX_BLACK);
     tft.setCursor(5, 5);
@@ -441,9 +598,9 @@ void updateDisplay() {
     tft.println(F("================"));
     displayInitialized = true;
   }
-  
+
   // Error indicator
-  bool hasError = (heaterTemp <= -100.0 || averageTemp <= -100.0 || !heaterSensorDetected);
+  bool hasError = (dispHeaterTemp <= -100.0 || dispAvgTemp <= -100.0 || !dispHeaterDetected);
   if (hasError) {
     tft.fillRect(0, 20, 160, 20, ST77XX_BLACK);
     tft.setCursor(5, 20);
@@ -451,69 +608,73 @@ void updateDisplay() {
     tft.setTextColor(ST77XX_RED);
     tft.println(F("SENSOR ERROR"));
   }
-  
+
   // Average temperature
-  if (abs(averageTemp - lastDisplayedAvg) > 0.1 || !hasError) {
+  if (abs(dispAvgTemp - lastDisplayedAvg) > 0.1 || !hasError) {
     tft.fillRect(0, 40, 160, 20, ST77XX_BLACK);
     tft.setCursor(1, 40);
     tft.setTextSize(2);
-    
-    if (averageTemp > -100) {
-      if (averageTemp < TEMP_MIN) {
+
+    if (dispAvgTemp > -100) {
+      if (dispAvgTemp < dispTempMin) {
         tft.setTextColor(ST77XX_CYAN);
-      } else if (averageTemp > TEMP_MAX) {
+      } else if (dispAvgTemp > dispTempMax) {
         tft.setTextColor(ST77XX_ORANGE);
       } else {
         tft.setTextColor(ST77XX_YELLOW);
       }
-      tft.print(averageTemp, 1);
+      tft.print(dispAvgTemp, 1);
       tft.print(F("C"));
     } else {
       tft.setTextColor(ST77XX_RED);
       tft.print(F("ERROR"));
     }
-    lastDisplayedAvg = averageTemp;
+    lastDisplayedAvg = dispAvgTemp;
   }
-  
+
   // Heater status
   tft.fillRect(0, 65, 160, 12, ST77XX_BLACK);
   tft.setCursor(2, 65);
   tft.setTextSize(1);
   tft.setTextColor(ST77XX_RED);
-  if (heaterTemp > -100) {
+  if (dispHeaterTemp > -100) {
     tft.print(F("H:"));
-    tft.print(heaterTemp, 1);
+    tft.print(dispHeaterTemp, 1);
     tft.print(F("C "));
   } else {
     tft.print(F("H:ERR "));
   }
-  tft.print(heaterOn ? F("ON") : F("OFF"));
-  
-  // Fan status
+  tft.print(dispHeaterOn ? F("ON") : F("OFF"));
+
+  // Fan status (show cooldown mode)
   tft.fillRect(0, 80, 160, 12, ST77XX_BLACK);
   tft.setCursor(2, 80);
   tft.setTextColor(ST77XX_WHITE);
   tft.print(F("Fan: "));
-  tft.print(fansOn ? F("ON") : F("OFF"));
-  
+  tft.print(dispFansOn ? F("ON") : F("OFF"));
+  if (dispInCooldown) {
+    tft.setTextColor(ST77XX_YELLOW);
+    tft.print(F(" [CD]"));
+  }
+
   // Sensor values
   tft.fillRect(0, 95, 160, 33, ST77XX_BLACK);
   tft.setCursor(2, 95);
   tft.setTextColor(ST77XX_CYAN);
-  
-  for (int i = 0; i < numLeftSensors && i < 3; i++) {
-    if (leftTemperatures[i] > -100) {
-      tft.print(leftTemperatures[i], 1);
+
+  for (int i = 0; i < dispNumLeft && i < 3; i++) {
+    if (dispLeftTemps[i] > -100) {
+      tft.print(dispLeftTemps[i], 1);
       tft.print(F(" "));
     } else {
       tft.print(F("-- "));
     }
   }
-  
+
   tft.setCursor(2, 107);
-  for (int i = 0; i < numRightSensors && i < 3; i++) {
-    if (rightTemperatures[i] > -100) {
-      tft.print(rightTemperatures[i], 1);
+  for (int i = 0; i < dispNumRight && i < 3; i++) {
+    if (dispRightTemps[i] > -100) {
+      tft.print(dispRightTemps[i], 1);
       tft.print(F(" "));
     } else {
       tft.print(F("-- "));
@@ -522,7 +683,39 @@ void updateDisplay() {
 }
 
 void handleRoot() {
-  String html = F("<!DOCTYPE html><html><head>"
+  // Pre-allocate string to prevent fragmentation
+  String html;
+  html.reserve(3072);  // 3KB sufficient for current HTML size
+
+  // Thread-safe copy of data
+  float safeAvgTemp, safeHeaterTemp;
+  float safeTempMin, safeTempMax, safeHeaterMax;
+  bool safeHeaterOn, safeFansOn, safeHeaterDetected;
+  float safeLeftTemps[3], safeRightTemps[3];
+  int safeNumLeft, safeNumRight;
+
+  if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+    safeAvgTemp = averageTemp;
+    safeHeaterTemp = heaterTemp;
+    safeTempMin = TEMP_MIN;
+    safeTempMax = TEMP_MAX;
+    safeHeaterMax = HEATER_SAFETY_MAX;
+    safeHeaterOn = heaterOn;
+    safeFansOn = fansOn;
+    safeHeaterDetected = heaterSensorDetected;
+    safeNumLeft = numLeftSensors;
+    safeNumRight = numRightSensors;
+    for (int i = 0; i < 3; i++) {
+      safeLeftTemps[i] = leftTemperatures[i];
+      safeRightTemps[i] = rightTemperatures[i];
+    }
+    xSemaphoreGive(dataMutex);
+  } else {
+    server.send(503, F("text/plain"), F("System busy"));
+    return;
+  }
+
+  html = F("<!DOCTYPE html><html><head>"
     "<meta name='viewport' content='width=device-width,initial-scale=1'>"
     "<style>"
     "body{font-family:Arial;margin:20px;background:#1a1a1a;color:#fff;}"
@@ -567,85 +760,85 @@ void handleRoot() {
     "<h1>Greenhouse Control</h1>");
   
   html += F("<div class='card'><h2>Status</h2>");
-  
-  if (!heaterSensorDetected || heaterTemp <= -100.0 || averageTemp <= -100.0) {
+
+  if (!safeHeaterDetected || safeHeaterTemp <= -100.0 || safeAvgTemp <= -100.0) {
     html += F("<div class='status' style='background:#f44336;'>FAULT</div><br>");
   }
-  
+
   html += F("<div class='status ");
-  html += heaterOn ? F("on") : F("off");
+  html += safeHeaterOn ? F("on") : F("off");
   html += F("' id='heaterState'>Heater: ");
-  html += heaterOn ? F("ON") : F("OFF");
+  html += safeHeaterOn ? F("ON") : F("OFF");
   html += F("</div>");
-  
+
   html += F("<div class='status ");
-  html += fansOn ? F("on") : F("off");
+  html += safeFansOn ? F("on") : F("off");
   html += F("' id='fansState'>Fans: ");
-  html += fansOn ? F("ON") : F("OFF");
+  html += safeFansOn ? F("ON") : F("OFF");
   html += F("</div></div>");
-  
+
   html += F("<div class='card'><h2>Temperatures</h2>"
     "<div class='temp' id='avgTemp'>");
-  html += String(averageTemp, 1);
+  html += String(safeAvgTemp, 1);
   html += F("C</div>"
     "<p style='text-align:center;color:#aaa;'>Average Temperature</p>"
     "<p style='text-align:center;'>Heater: <span id='heatTemp' style='color:#FF6B6B;font-weight:bold;'>");
-  html += String(heaterTemp, 1);
+  html += String(safeHeaterTemp, 1);
   html += F("C</span></p></div>");
-  
+
   html += F("<div class='card'><h2>Sensors</h2><div class='sensor-grid'>");
-  
-  for (int i = 0; i < numLeftSensors && i < 3; i++) {
+
+  for (int i = 0; i < safeNumLeft && i < 3; i++) {
     html += F("<div class='sensor'><div style='color:#aaa;'>L");
     html += String(i);
     html += F("</div>");
-    if (leftTemperatures[i] > -100) {
+    if (safeLeftTemps[i] > -100) {
       html += F("<div style='color:#87CEEB;font-weight:bold;'>");
-      html += String(leftTemperatures[i], 1);
+      html += String(safeLeftTemps[i], 1);
       html += F("C</div>");
     } else {
       html += F("<div style='color:#f44336;'>ERR</div>");
     }
     html += F("</div>");
   }
-  
-  for (int i = 0; i < numRightSensors && i < 3; i++) {
+
+  for (int i = 0; i < safeNumRight && i < 3; i++) {
     html += F("<div class='sensor'><div style='color:#aaa;'>R");
     html += String(i);
     html += F("</div>");
-    if (rightTemperatures[i] > -100) {
+    if (safeRightTemps[i] > -100) {
       html += F("<div style='color:#87CEEB;font-weight:bold;'>");
-      html += String(rightTemperatures[i], 1);
+      html += String(safeRightTemps[i], 1);
       html += F("C</div>");
     } else {
       html += F("<div style='color:#f44336;'>ERR</div>");
     }
     html += F("</div>");
   }
-  
+
   html += F("</div></div>");
-  
+
   html += F("<div class='card'><h2>Controls</h2>"
     "<div class='control'><span>Heating ON at:</span>"
     "<span class='value' id='tempMinVal'>");
-  html += String(TEMP_MIN, 1);
+  html += String(safeTempMin, 1);
   html += F("C</span>"
     "<button class='btn' onclick='adjust(\"tempmin\",\"down\")'>-</button>"
     "<button class='btn' onclick='adjust(\"tempmin\",\"up\")'>+</button></div>"
     "<div class='control'><span>Cooling ON at:</span>"
     "<span class='value' id='tempMaxVal'>");
-  html += String(TEMP_MAX, 1);
+  html += String(safeTempMax, 1);
   html += F("C</span>"
     "<button class='btn' onclick='adjust(\"tempmax\",\"down\")'>-</button>"
     "<button class='btn' onclick='adjust(\"tempmax\",\"up\")'>+</button></div>"
     "<div class='control'><span>Heater Max:</span>"
     "<span class='value' id='heaterMaxVal'>");
-  html += String(HEATER_SAFETY_MAX, 1);
+  html += String(safeHeaterMax, 1);
   html += F("C</span>"
     "<button class='btn' onclick='adjust(\"heatmax\",\"down\")'>-</button>"
     "<button class='btn' onclick='adjust(\"heatmax\",\"up\")'>+</button></div></div>"
     "<div style='text-align:center;margin-top:30px;color:#666;font-size:12px;'>"
-    "Greenhouse Controller v4.2</div></div></body></html>");
+    "Greenhouse Controller v4.3</div></div></body></html>");
   
   server.send(200, F("text/html"), html);
 }
@@ -655,44 +848,61 @@ void handleAdjust() {
     String param = server.arg(F("param"));
     String action = server.arg(F("action"));
     float delta = (action == F("up")) ? 0.5 : -0.5;
-    
-    if (param == F("tempmin")) {
-      TEMP_MIN += delta;
-      TEMP_MIN = constrain(TEMP_MIN, 5.0, 15.0);
-    } else if (param == F("tempmax")) {
-      TEMP_MAX += delta;
-      TEMP_MAX = constrain(TEMP_MAX, 20.0, 35.0);
-    } else if (param == F("heatmax")) {
-      HEATER_SAFETY_MAX += delta;
-      HEATER_SAFETY_MAX = constrain(HEATER_SAFETY_MAX, 30.0, 40.0);
+
+    if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+      if (param == F("tempmin")) {
+        TEMP_MIN += delta;
+        TEMP_MIN = constrain(TEMP_MIN, 5.0, 15.0);
+        Serial.print(F("TEMP_MIN adjusted to: "));
+        Serial.println(TEMP_MIN, 1);
+      } else if (param == F("tempmax")) {
+        TEMP_MAX += delta;
+        TEMP_MAX = constrain(TEMP_MAX, 20.0, 35.0);
+        Serial.print(F("TEMP_MAX adjusted to: "));
+        Serial.println(TEMP_MAX, 1);
+      } else if (param == F("heatmax")) {
+        HEATER_SAFETY_MAX += delta;
+        HEATER_SAFETY_MAX = constrain(HEATER_SAFETY_MAX, 30.0, 40.0);
+        Serial.print(F("HEATER_SAFETY_MAX adjusted to: "));
+        Serial.println(HEATER_SAFETY_MAX, 1);
+      }
+      xSemaphoreGive(dataMutex);
     }
   }
-  
+
   server.sendHeader(F("Location"), F("/"));
   server.send(303);
 }
 
 void handleStatusJSON() {
   StaticJsonDocument<256> doc;
-  
-  doc["avg"] = (averageTemp > -100) ? averageTemp : -127.0;
-  doc["heater"] = heaterOn ? 1 : 0;
-  doc["fans"] = fansOn ? 1 : 0;
-  doc["heat_temp"] = (heaterTemp > -100) ? heaterTemp : -127.0;
-  doc["temp_min"] = TEMP_MIN;
-  doc["temp_max"] = TEMP_MAX;
-  doc["heater_max"] = HEATER_SAFETY_MAX;
-  
-  JsonArray left = doc.createNestedArray("left");
-  for (int i = 0; i < numLeftSensors && i < 3; i++) {
-    left.add(leftTemperatures[i]);
+
+  // Thread-safe copy of data
+  if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+    doc["avg"] = (averageTemp > -100) ? averageTemp : -127.0;
+    doc["heater"] = heaterOn ? 1 : 0;
+    doc["fans"] = fansOn ? 1 : 0;
+    doc["heat_temp"] = (heaterTemp > -100) ? heaterTemp : -127.0;
+    doc["temp_min"] = TEMP_MIN;
+    doc["temp_max"] = TEMP_MAX;
+    doc["heater_max"] = HEATER_SAFETY_MAX;
+
+    JsonArray left = doc.createNestedArray("left");
+    for (int i = 0; i < numLeftSensors && i < 3; i++) {
+      left.add(leftTemperatures[i]);
+    }
+
+    JsonArray right = doc.createNestedArray("right");
+    for (int i = 0; i < numRightSensors && i < 3; i++) {
+      right.add(rightTemperatures[i]);
+    }
+
+    xSemaphoreGive(dataMutex);
+  } else {
+    server.send(503, F("application/json"), F("{\"error\":\"busy\"}"));
+    return;
   }
-  
-  JsonArray right = doc.createNestedArray("right");
-  for (int i = 0; i < numRightSensors && i < 3; i++) {
-    right.add(rightTemperatures[i]);
-  }
-  
+
   String output;
   serializeJson(doc, output);
   server.send(200, F("application/json"), output);
