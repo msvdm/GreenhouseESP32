@@ -55,7 +55,7 @@ float HEATER_CRITICAL_MAX = 50.0;   // Fan temperature limit (AC outdoor unit ra
 #define HYSTERESIS 0.5              // Temperature deadband
 #define MODE_CHANGE_HYSTERESIS 1.0  // Extra hysteresis to prevent mode oscillation
 #define HEATING_TARGET_OFFSET 2.0   // Heat until TEMP_MIN + this offset (prevents short cycling)
-#define MAX_TEMP_CHANGE_PER_CYCLE 5.0  // Max °C change between readings (spike filter)
+#define MAX_TEMP_CHANGE_PER_CYCLE 5.0  // Max C change between readings (spike filter)
 
 // ============================================================================
 // SAFETY TIMERS - PREVENT RUNAWAY CONDITIONS
@@ -344,15 +344,15 @@ void setup() {
   
   Serial.print(F("Temperature Range: "));
   Serial.print(TEMP_MIN, 1);
-  Serial.print(F("°C - "));
+  Serial.print(F("C - "));
   Serial.print(TEMP_MAX, 1);
-  Serial.println(F("°C"));
+  Serial.println(F("C"));
   
   Serial.print(F("Heater Safety: "));
   Serial.print(HEATER_SAFETY_MAX, 1);
-  Serial.print(F("°C / Critical: "));
+  Serial.print(F("C / Critical: "));
   Serial.print(HEATER_CRITICAL_MAX, 1);
-  Serial.println(F("°C\n"));
+  Serial.println(F("C\n"));
 }
 
 // ============================================================================
@@ -457,7 +457,7 @@ void readHeaterTemperature() {
     if (change > MAX_TEMP_CHANGE_PER_CYCLE) {
       Serial.print(F("⚠ Heater sensor spike rejected: "));
       Serial.print(change, 1);
-      Serial.println(F("°C"));
+      Serial.println(F("C"));
       return;  // Keep previous reading
     }
   }
@@ -469,12 +469,12 @@ void readHeaterTemperature() {
   if (heaterTemp >= HEATER_CRITICAL_MAX) {
     Serial.print(F("🚨 CRITICAL: Heater temp "));
     Serial.print(heaterTemp, 1);
-    Serial.println(F("°C - FAN LIMIT EXCEEDED"));
+    Serial.println(F("C - FAN LIMIT EXCEEDED"));
     safetyShutdown("Heater critical temperature");
   } else if (heaterTemp >= HEATER_SAFETY_MAX) {
     Serial.print(F("⚠ WARNING: Heater temp "));
     Serial.print(heaterTemp, 1);
-    Serial.println(F("°C - Safety limit reached"));
+    Serial.println(F("C - Safety limit reached"));
     if (heaterOn) {
       safetyShutdown("Heater safety temperature exceeded");
     }
@@ -722,7 +722,7 @@ void controlSystem() {
       // CRITICAL: Only turn on heater if ALL conditions are safe
       if (!heaterOn &&
           heaterTemp > 0 &&
-          heaterTemp < HEATER_SAFETY_MAX - 2.0 &&  // 2°C safety margin
+          heaterTemp < HEATER_SAFETY_MAX - 2.0 &&  // 2C safety margin
           fansOn &&
           (currentMillis - fanStartTime >= FAN_STARTUP_DELAY)) {
         
@@ -737,9 +737,9 @@ void controlSystem() {
         
         Serial.print(F("🔥 Heater ON: Avg="));
         Serial.print(averageTemp, 1);
-        Serial.print(F("°C Heater="));
+        Serial.print(F("C Heater="));
         Serial.print(heaterTemp, 1);
-        Serial.println(F("°C"));
+        Serial.println(F("C"));
       }
       currentMode = MODE_HEATING;
       break;
@@ -761,7 +761,7 @@ void controlSystem() {
         stats.totalCoolingCycles++;
         Serial.print(F("❄️  COOLING: "));
         Serial.print(averageTemp, 1);
-        Serial.println(F("°C"));
+        Serial.println(F("C"));
       }
       currentMode = MODE_COOLING;
       break;
@@ -801,7 +801,7 @@ void controlSystem() {
       if (currentMode != MODE_IDLE) {
         Serial.print(F("💤 IDLE: "));
         Serial.print(averageTemp, 1);
-        Serial.println(F("°C"));
+        Serial.println(F("C"));
       }
       currentMode = MODE_IDLE;
       break;
@@ -1097,15 +1097,15 @@ void handleRoot() {
     "try{"
     "const r=await fetch('/status');"
     "const d=await r.json();"
-    "document.getElementById('avgTemp').textContent=(d.avg>-100)?d.avg.toFixed(1)+'°C':'ERROR';"
+    "document.getElementById('avgTemp').textContent=(d.avg>-100)?d.avg.toFixed(1)+'C':'ERROR';"
     "document.getElementById('heaterState').textContent=(d.heater==1)?'ON':'OFF';"
     "document.getElementById('heaterState').className='status '+((d.heater==1)?'on':'off');"
     "document.getElementById('fansState').textContent=(d.fans==1)?'ON':'OFF';"
     "document.getElementById('fansState').className='status '+((d.fans==1)?'on':'off');"
-    "document.getElementById('heatTemp').textContent=(d.heat_temp>-100)?d.heat_temp.toFixed(1)+'°C':'ERROR';"
-    "document.getElementById('tempMinVal').textContent=d.temp_min.toFixed(1)+'°C';"
-    "document.getElementById('tempMaxVal').textContent=d.temp_max.toFixed(1)+'°C';"
-    "document.getElementById('heaterMaxVal').textContent=d.heater_max.toFixed(1)+'°C';"
+    "document.getElementById('heatTemp').textContent=(d.heat_temp>-100)?d.heat_temp.toFixed(1)+'C':'ERROR';"
+    "document.getElementById('tempMinVal').textContent=d.temp_min.toFixed(1)+'C';"
+    "document.getElementById('tempMaxVal').textContent=d.temp_max.toFixed(1)+'C';"
+    "document.getElementById('heaterMaxVal').textContent=d.heater_max.toFixed(1)+'C';"
     "const faultDiv=document.getElementById('faultAlert');"
     "if(d.fault){faultDiv.style.display='block';document.getElementById('faultReason').textContent=d.fault_reason;}else{faultDiv.style.display='none';}"
     "}catch(e){console.error(e);}}"
@@ -1121,7 +1121,7 @@ void handleRoot() {
     "</script>"
     "</head><body>"
     "<div class='container'>"
-    "<h1>🌿 Greenhouse Controller</h1>"
+    "<h1>Greenhouse Controller</h1>"
     "<div class='version'>v");
   
   html += FIRMWARE_VERSION;
@@ -1130,7 +1130,7 @@ void handleRoot() {
   // Fault alert
   if (safeFault) {
     html += F("<div id='faultAlert' class='alert'>"
-      "🚨 SYSTEM FAULT 🚨<br>"
+      "SYSTEM FAULT<br>"
       "<span id='faultReason'>");
     html += safeFaultReason;
     html += F("</span><br>"
@@ -1138,7 +1138,7 @@ void handleRoot() {
       "</div>");
   } else {
     html += F("<div id='faultAlert' class='alert' style='display:none;'>"
-      "🚨 SYSTEM FAULT 🚨<br>"
+      "SYSTEM FAULT<br>"
       "<span id='faultReason'></span><br>"
       "<button class='btn danger' onclick='resetFault()' style='margin-top:10px;'>Clear Fault & Resume</button>"
       "</div>");
@@ -1152,13 +1152,13 @@ void handleRoot() {
 
   html += F("<div class='status ");
   html += safeHeaterOn ? F("on") : F("off");
-  html += F("' id='heaterState'>🔥 Heater: ");
+  html += F("' id='heaterState'>Heater: ");
   html += safeHeaterOn ? F("ON") : F("OFF");
   html += F("</div>");
 
   html += F("<div class='status ");
   html += safeFansOn ? F("on") : F("off");
-  html += F("' id='fansState'>💨 Fans: ");
+  html += F("' id='fansState'>Fans: ");
   html += safeFansOn ? F("ON") : F("OFF");
   html += F("</div>");
   
@@ -1183,11 +1183,11 @@ void handleRoot() {
   html += F("<div class='card'><h2>Temperatures</h2>"
     "<div class='temp' id='avgTemp'>");
   html += String(safeAvgTemp, 1);
-  html += F("°C</div>"
+  html += F("C</div>"
     "<p style='text-align:center;color:#aaa;font-size:14px;'>Average Air Temperature</p>"
     "<p style='text-align:center;margin-top:15px;'>Heater Zone: <span id='heatTemp' style='color:#FF6B6B;font-weight:bold;font-size:20px;'>");
   html += String(safeHeaterTemp, 1);
-  html += F("°C</span></p></div>");
+  html += F("C</span></p></div>");
 
   html += F("<div class='card'><h2>Sensor Array</h2><div class='sensor-grid'>");
 
@@ -1198,7 +1198,7 @@ void handleRoot() {
     if (safeLeftTemps[i] > -100) {
       html += F("<div class='sensor-value'>");
       html += String(safeLeftTemps[i], 1);
-      html += F("°C</div>");
+      html += F("C</div>");
     } else {
       html += F("<div class='sensor-value' style='color:#f44336;'>ERROR</div>");
     }
@@ -1212,7 +1212,7 @@ void handleRoot() {
     if (safeRightTemps[i] > -100) {
       html += F("<div class='sensor-value'>");
       html += String(safeRightTemps[i], 1);
-      html += F("°C</div>");
+      html += F("C</div>");
     } else {
       html += F("<div class='sensor-value' style='color:#f44336;'>ERROR</div>");
     }
@@ -1222,35 +1222,35 @@ void handleRoot() {
   html += F("</div></div>");
 
   html += F("<div class='card'><h2>Temperature Control</h2>"
-    "<div class='control'><span>🔵 Heating Starts:</span>"
+    "<div class='control'><span>Heating Starts:</span>"
     "<span class='value' id='tempMinVal'>");
   html += String(safeTempMin, 1);
-  html += F("°C</span>"
-    "<div><button class='btn' onclick='adjust(\"tempmin\",\"down\")'>−</button>"
+  html += F("C</span>"
+    "<div><button class='btn' onclick='adjust(\"tempmin\",\"down\")'>-</button>"
     "<button class='btn' onclick='adjust(\"tempmin\",\"up\")'>+</button></div></div>"
-    "<div class='control'><span>🔴 Cooling Starts:</span>"
+    "<div class='control'><span>Cooling Starts:</span>"
     "<span class='value' id='tempMaxVal'>");
   html += String(safeTempMax, 1);
-  html += F("°C</span>"
-    "<div><button class='btn' onclick='adjust(\"tempmax\",\"down\")'>−</button>"
+  html += F("C</span>"
+    "<div><button class='btn' onclick='adjust(\"tempmax\",\"down\")'>-</button>"
     "<button class='btn' onclick='adjust(\"tempmax\",\"up\")'>+</button></div></div></div>");
 
   html += F("<div class='card'><h2>Safety Limits</h2>"
-    "<div class='control'><span>⚠️ Heater Safety Limit:</span>"
+    "<div class='control'><span>Heater Safety Limit:</span>"
     "<span class='value' id='heaterMaxVal'>");
   html += String(safeHeaterMax, 1);
-  html += F("°C</span>"
-    "<div><button class='btn' onclick='adjust(\"heatmax\",\"down\")'>−</button>"
+  html += F("C</span>"
+    "<div><button class='btn' onclick='adjust(\"heatmax\",\"down\")'>-</button>"
     "<button class='btn' onclick='adjust(\"heatmax\",\"up\")'>+</button></div></div>"
-    "<div class='info-row'><span class='info-label'>🚨 Critical Shutdown:</span><span class='info-value'>");
+    "<div class='info-row'><span class='info-label'>Critical Shutdown:</span><span class='info-value'>");
   html += String(safeHeaterCritical, 1);
-  html += F("°C</span></div>"
+  html += F("C</span></div>"
     "<p style='color:#888;font-size:12px;margin:10px 0 0 0;'>Max continuous runtime: 30 min | Min off-time: 5 min | Max cycles/hour: 6</p></div>");
 
   html += F("<div class='card'><h2>Quick Links</h2>"
     "<div style='text-align:center;'>"
-    "<button class='btn' onclick='location.href=\"/stats\"'>📊 Statistics</button>"
-    "<button class='btn' onclick='location.reload()'>🔄 Refresh</button>"
+    "<button class='btn' onclick='location.href=\"/stats\"'>Statistics</button>"
+    "<button class='btn' onclick='location.reload()'>Refresh</button>"
     "</div></div>");
 
   html += F("<div style='text-align:center;margin-top:20px;color:#666;font-size:12px;'>"
@@ -1277,23 +1277,23 @@ void handleAdjust() {
         TEMP_MIN += delta;
         TEMP_MIN = constrain(TEMP_MIN, 5.0, 20.0);
         settingsChangedTime = millis();
-        Serial.print(F("⚙️  TEMP_MIN → "));
+        Serial.print(F("TEMP_MIN → "));
         Serial.print(TEMP_MIN, 1);
-        Serial.println(F("°C"));
+        Serial.println(F("C"));
       } else if (param == F("tempmax")) {
         TEMP_MAX += delta;
         TEMP_MAX = constrain(TEMP_MAX, 15.0, 40.0);
         settingsChangedTime = millis();
-        Serial.print(F("⚙️  TEMP_MAX → "));
+        Serial.print(F("TEMP_MAX → "));
         Serial.print(TEMP_MAX, 1);
-        Serial.println(F("°C"));
+        Serial.println(F("C"));
       } else if (param == F("heatmax")) {
         HEATER_SAFETY_MAX += delta;
         HEATER_SAFETY_MAX = constrain(HEATER_SAFETY_MAX, 25.0, 45.0);
         settingsChangedTime = millis();
-        Serial.print(F("⚙️  HEATER_SAFETY_MAX → "));
+        Serial.print(F("HEATER_SAFETY_MAX → "));
         Serial.print(HEATER_SAFETY_MAX, 1);
-        Serial.println(F("°C"));
+        Serial.println(F("C"));
       }
       xSemaphoreGive(dataMutex);
     }
@@ -1364,7 +1364,7 @@ void handleStats() {
     "</style>"
     "</head><body>"
     "<div class='container'>"
-    "<h1>📊 System Statistics</h1>"
+    "<h1>System Statistics</h1>"
     "<div class='card'>");
 
   if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
@@ -1386,11 +1386,11 @@ void handleStats() {
 
     html += F("<div class='stat'><span class='label'>Min Temperature:</span><span class='value'>");
     html += String(stats.minTempRecorded, 1);
-    html += F("°C</span></div>");
+    html += F("C</span></div>");
 
     html += F("<div class='stat'><span class='label'>Max Temperature:</span><span class='value'>");
     html += String(stats.maxTempRecorded, 1);
-    html += F("°C</span></div>");
+    html += F("C</span></div>");
 
     html += F("<div class='stat'><span class='label'>Safety Shutdowns:</span><span class='value'>");
     html += String(stats.safetyShutdownCount);
@@ -1407,7 +1407,7 @@ void handleStats() {
   }
 
   html += F("</div>"
-    "<button class='btn' onclick='location.href=\"/\"'>← Back to Control</button>"
+    "<button class='btn' onclick='location.href=\"/\"'>Back to Control</button>"
     "</div></body></html>");
 
   server.send(200, F("text/html"), html);
@@ -1463,7 +1463,7 @@ void saveSettings() {
   
   preferences.end();
   
-  Serial.println(F("💾 Settings saved to EEPROM"));
+  Serial.println(F("Settings saved to EEPROM"));
 }
 
 // ============================================================================
@@ -1476,11 +1476,11 @@ void logStatistics() {
   
   Serial.print(F("Average Temp: "));
   Serial.print(averageTemp, 1);
-  Serial.println(F("°C"));
+  Serial.println(F("C"));
   
   Serial.print(F("Heater Zone: "));
   Serial.print(heaterTemp, 1);
-  Serial.println(F("°C"));
+  Serial.println(F("C"));
   
   Serial.print(F("Mode: "));
   switch(currentMode) {
@@ -1500,9 +1500,9 @@ void logStatistics() {
   
   Serial.print(F("Temp Range: "));
   Serial.print(stats.minTempRecorded, 1);
-  Serial.print(F("°C - "));
+  Serial.print(F("C - "));
   Serial.print(stats.maxTempRecorded, 1);
-  Serial.println(F("°C"));
+  Serial.println(F("C"));
   
   Serial.println(F("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"));
 }
