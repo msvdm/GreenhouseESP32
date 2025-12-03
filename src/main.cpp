@@ -190,6 +190,7 @@ void handleAdjust();
 void handleStatusJSON();
 void handleStats();
 void handleReset();
+void handleResetStats();
 void loadSettings();
 void saveSettings();
 bool checkHeatingCycleLimit();
@@ -876,9 +877,9 @@ void updateDisplay() {
     displayInitialized = true;
   }
 
-  // Fault indicator (highest priority)
+  // Fault indicator (highest priority) - skip average temp display if fault
   if (dispFault) {
-    tft.fillRect(0, 20, 160, 20, ST77XX_BLACK);
+    tft.fillRect(0, 20, 160, 30, ST77XX_BLACK);
     tft.setCursor(5, 20);
     tft.setTextSize(1);
     tft.setTextColor(ST77XX_RED);
@@ -886,28 +887,14 @@ void updateDisplay() {
     tft.setCursor(5, 30);
     tft.setTextColor(ST77XX_YELLOW);
     tft.println(F("Web: /reset"));
-  } else {
-    // Error indicator
-    bool hasError = (dispHeaterTemp <= -100.0 || dispAvgTemp <= -100.0 || !dispHeaterDetected);
-    if (hasError) {
-      tft.fillRect(0, 20, 160, 20, ST77XX_BLACK);
-      tft.setCursor(5, 20);
-      tft.setTextSize(1);
-      tft.setTextColor(ST77XX_ORANGE);
-      tft.println(F("SENSOR ERROR"));
-    } else {
-      tft.fillRect(0, 20, 160, 20, ST77XX_BLACK);
-    }
-  }
-
-  // Average temperature
-  if (abs(dispAvgTemp - lastDisplayedAvg) > 0.1 || dispFault) {
-    tft.fillRect(0, 40, 160, 20, ST77XX_BLACK);
-    tft.setCursor(1, 40);
-    tft.setTextSize(1);
-    tft.setTextColor(ST77XX_WHITE);
-    tft.print(F("Avrg Temp: "));
-
+    lastDisplayedAvg = -999.0; // Force update when fault clears
+  } else if (abs(dispAvgTemp - lastDisplayedAvg) > 0.1) {
+    // Average temperature
+    tft.fillRect(0, 20, 160, 30, ST77XX_BLACK);
+    tft.setCursor(1, 20);
+    tft.setTextSize(2);
+    tft.setTextColor(ST77XX_YELLOW);
+    tft.print(F("Average:"));
     if (dispAvgTemp > -100) {
       if (dispAvgTemp < dispTempMin) {
         tft.setTextColor(ST77XX_CYAN);
