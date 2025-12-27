@@ -115,16 +115,13 @@ enum SystemMode {
   MODE_IDLE,
   MODE_HEATING,
   MODE_COOLING,
-  MODE_COOLDOWN,
-  MODE_FAULT
+  MODE_COOLDOWN
 };
 SystemMode currentMode = MODE_IDLE;
 
 bool heaterOn = false;
 bool fansOn = false;
 bool inCooldownMode = false;
-bool systemFault = false;
-String faultReason = "";
 
 // ============================================================================
 // SAFETY TRACKING VARIABLES
@@ -194,14 +191,11 @@ void handleRoot();
 void handleAdjust();
 void handleStatusJSON();
 void handleStats();
-void handleReset();
 void handleResetStats();
 void loadSettings();
 void saveSettings();
 bool checkHeatingCycleLimit();
 void logStatistics();
-void clearFault();
-
 // ============================================================================
 // SETUP
 // ============================================================================
@@ -334,7 +328,6 @@ void setup() {
   server.on("/adjust", handleAdjust);
   server.on("/status", handleStatusJSON);
   server.on("/stats", handleStats);
-  server.on("/reset", handleReset);
   server.on("/resetstats", handleResetStats);
   server.begin();
   Serial.println(F("✓ Web server started"));
@@ -626,9 +619,9 @@ void controlSystem() {
   // Determine target mode based on temperature with hysteresis
   SystemMode targetMode = MODE_IDLE;
 
-  if (averageTemp < TEMP_MIN - (currentMode == MODE_HEATING ? 0 : MODE_CHANGE_HYSTERESIS)) {
+  if (averageTemp < TEMP_MIN) {
     targetMode = MODE_HEATING;
-  } else if (averageTemp > TEMP_MAX + (currentMode == MODE_COOLING ? 0 : MODE_CHANGE_HYSTERESIS)) {
+  } else if (averageTemp > TEMP_MAX) {
     targetMode = MODE_COOLING;
   } else if (averageTemp >= TEMP_MIN + HEATING_TARGET_OFFSET + HYSTERESIS && currentMode == MODE_HEATING) {
     // Heating target reached - enter cooldown
@@ -649,7 +642,6 @@ void controlSystem() {
       case MODE_HEATING: Serial.print(F("HEATING")); break;
       case MODE_COOLING: Serial.print(F("COOLING")); break;
       case MODE_COOLDOWN: Serial.print(F("COOLDOWN")); break;
-      case MODE_FAULT: Serial.print(F("FAULT")); break;
     }
     Serial.print(F(" → "));
     switch(targetMode) {
@@ -657,7 +649,6 @@ void controlSystem() {
       case MODE_HEATING: Serial.println(F("HEATING")); break;
       case MODE_COOLING: Serial.println(F("COOLING")); break;
       case MODE_COOLDOWN: Serial.println(F("COOLDOWN")); break;
-      case MODE_FAULT: Serial.println(F("FAULT")); break;
     }
   }
 
@@ -783,10 +774,6 @@ void controlSystem() {
       }
       currentMode = MODE_IDLE;
       break;
-
-    case MODE_FAULT:
-      // Handled at top of function
-      break;
   }
 }
 
@@ -848,25 +835,12 @@ void safetyShutdown(String reason) {
 }
 
 // ============================================================================
-// CLEAR FAULT STATE (Manual intervention required)
-// ============================================================================
-void clearFault() {
-  if (systemFault) {
-    systemFault = false;
-    faultReason = "";
-    currentMode = MODE_IDLE;
-    Serial.println(F("✓ Fault cleared - System resuming normal operation"));
-  }
-}
-
-// ============================================================================
 // UPDATE DISPLAY
 // ============================================================================
 void updateDisplay() {
   // Make thread-safe copy of display data
   float dispAvgTemp, dispHeaterTemp;
   bool dispHeaterOn, dispFansOn, dispHeaterDetected, dispInCooldown;
-  bool dispFault;
   float dispLeftTemps[3], dispRightTemps[3];
   int dispNumLeft, dispNumRight;
   float dispTempMin, dispTempMax;
@@ -879,7 +853,6 @@ void updateDisplay() {
     dispFansOn = fansOn;
     dispHeaterDetected = heaterSensorDetected;
     dispInCooldown = inCooldownMode;
-    dispFault = systemFault;
     dispNumLeft = numLeftSensors;
     dispNumRight = numRightSensors;
     dispTempMin = TEMP_MIN;
@@ -905,19 +878,8 @@ void updateDisplay() {
     displayInitialized = true;
   }
 
-  // Fault indicator (highest priority) - skip average temp display if fault
-  if (dispFault) {
-    tft.fillRect(0, 20, 160, 30, ST77XX_BLACK);
-    tft.setCursor(5, 20);
-    tft.setTextSize(1);
-    tft.setTextColor(ST77XX_RED);
-    tft.println(F("SYSTEM FAULT"));
-    tft.setCursor(5, 30);
-    tft.setTextColor(ST77XX_YELLOW);
-    tft.println(F("Web: /reset"));
-    lastDisplayedAvg = -999.0; // Force update when fault clears
-  } else if (abs(dispAvgTemp - lastDisplayedAvg) > 0.1) {
-    // Average temperature
+  // Average temperature
+  if (abs(dispAvgTemp - lastDisplayedAvg) > 0.1) {
     tft.fillRect(0, 20, 160, 30, ST77XX_BLACK);
     tft.setCursor(1, 20);
     tft.setTextSize(2);
@@ -1009,8 +971,7 @@ void handleRoot() {
   // Thread-safe copy of data
   float safeAvgTemp, safeHeaterTemp;
   float safeTempMin, safeTempMax, safeHeaterMax, safeHeaterCritical;
-  bool safeHeaterOn, safeFansOn, safeHeaterDetected, safeFault;
-  String safeFaultReason;
+  bool safeHeaterOn, safeFansOn, safeHeaterDetected;
   float safeLeftTemps[3], safeRightTemps[3];
   int safeNumLeft, safeNumRight;
   unsigned long safeTotalCycles, safeTotalRuntime;
@@ -1025,8 +986,6 @@ void handleRoot() {
     safeHeaterOn = heaterOn;
     safeFansOn = fansOn;
     safeHeaterDetected = heaterSensorDetected;
-    safeFault = systemFault;
-    safeFaultReason = faultReason;
     safeNumLeft = numLeftSensors;
     safeNumRight = numRightSensors;
     safeTotalCycles = stats.totalHeatingCycles;
@@ -1070,7 +1029,6 @@ void handleRoot() {
     ".info-row{display:flex;justify-content:space-between;margin:5px 0;}"
     ".info-label{color:#aaa;}"
     ".info-value{color:#fff;font-weight:bold;}"
-    ".alert{background:#f44336;color:#fff;padding:15px;border-radius:8px;text-align:center;font-weight:bold;margin:10px 0;}"
     "h2{color:#4CAF50;border-bottom:2px solid #4CAF50;padding-bottom:5px;margin-top:20px;}"
     "</style>"
     "<script>"
@@ -1087,16 +1045,10 @@ void handleRoot() {
     "document.getElementById('tempMinVal').textContent=d.temp_min.toFixed(1)+'C';"
     "document.getElementById('tempMaxVal').textContent=d.temp_max.toFixed(1)+'C';"
     "document.getElementById('heaterMaxVal').textContent=d.heater_max.toFixed(1)+'C';"
-    "const faultDiv=document.getElementById('faultAlert');"
-    "if(d.fault){faultDiv.style.display='block';document.getElementById('faultReason').textContent=d.fault_reason;}else{faultDiv.style.display='none';}"
     "}catch(e){console.error(e);}}"
     "async function adjust(p,a){"
     "await fetch('/adjust?param='+p+'&action='+a);"
     "setTimeout(update,200);}"
-    "async function resetFault(){"
-    "if(confirm('Clear system fault and resume operation?')){"
-    "await fetch('/reset');"
-    "setTimeout(()=>location.reload(),500);}}"
     "setInterval(update,2000);"
     "window.onload=update;"
     "</script>"
@@ -1108,28 +1060,7 @@ void handleRoot() {
   html += FIRMWARE_VERSION;
   html += F(" | Safety-Critical System</div>");
 
-  // Fault alert
-  if (safeFault) {
-    html += F("<div id='faultAlert' class='alert'>"
-      "SYSTEM FAULT<br>"
-      "<span id='faultReason'>");
-    html += safeFaultReason;
-    html += F("</span><br>"
-      "<button class='btn danger' onclick='resetFault()' style='margin-top:10px;'>Clear Fault & Resume</button>"
-      "</div>");
-  } else {
-    html += F("<div id='faultAlert' class='alert' style='display:none;'>"
-      "SYSTEM FAULT<br>"
-      "<span id='faultReason'></span><br>"
-      "<button class='btn danger' onclick='resetFault()' style='margin-top:10px;'>Clear Fault & Resume</button>"
-      "</div>");
-  }
-
   html += F("<div class='card'><h2>System Status</h2>");
-
-  if (!safeHeaterDetected || safeHeaterTemp <= -100.0 || safeAvgTemp <= -100.0) {
-    html += F("<div class='status fault'>⚠ SENSOR FAULT</div>");
-  }
 
   html += F("<div class='status ");
   html += safeHeaterOn ? F("on") : F("off");
@@ -1147,7 +1078,7 @@ void handleRoot() {
   html += String(safeTotalCycles);
   html += F("</span></div>");
 
-  html += F("<div class='info-row'><span class='info-label'>Total Heater Runtime:</span><span class='info-value'>");
+  html += F("<div class='info-row'><span class='info-label'>Total Runtime:</span><span class='info-value'>");
   html += String(safeTotalRuntime / 3600);
   html += F("h ");
   html += String((safeTotalRuntime % 3600) / 60);
@@ -1292,8 +1223,6 @@ void handleStatusJSON() {
     doc["temp_min"] = TEMP_MIN;
     doc["temp_max"] = TEMP_MAX;
     doc["heater_max"] = HEATER_SAFETY_MAX;
-    doc["fault"] = systemFault;
-    doc["fault_reason"] = faultReason;
 
     JsonArray left = doc.createNestedArray("left");
     for (int i = 0; i < numLeftSensors && i < 3; i++) {
@@ -1350,7 +1279,7 @@ void handleStats() {
     html += String(stats.totalCoolingCycles);
     html += F("</span></div>");
 
-    html += F("<div class='stat'><span class='label'>Total Heater Runtime:</span><span class='value'>");
+    html += F("<div class='stat'><span class='label'>Total Runtime:</span><span class='value'>");
     unsigned long totalHours = stats.totalHeaterRuntime / 3600000;
     unsigned long totalMinutes = (stats.totalHeaterRuntime % 3600000) / 60000;
     html += String(totalHours);
@@ -1383,11 +1312,11 @@ void handleStats() {
     html += String(stats.heaterSensorFailures);
     html += F("</span></div>");
 
-    html += F("<div class='stat'><span class='label'>Heater Critical Events (≥50C):</span><span class='value'>");
+    html += F("<div class='stat'><span class='label'>Heater Critical Events (50C):</span><span class='value'>");
     html += String(stats.heaterCriticalEvents);
     html += F("</span></div>");
 
-    html += F("<div class='stat'><span class='label'>Heater Safety Events (≥35C):</span><span class='value'>");
+    html += F("<div class='stat'><span class='label'>Heater Safety Events (35C):</span><span class='value'>");
     html += String(stats.heaterSafetyEvents);
     html += F("</span></div>");
 
@@ -1408,19 +1337,6 @@ void handleStats() {
     "</div></body></html>");
 
   server.send(200, F("text/html"), html);
-}
-
-// ============================================================================
-// WEB SERVER - RESET FAULT
-// ============================================================================
-void handleReset() {
-  if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-    clearFault();
-    xSemaphoreGive(dataMutex);
-  }
-
-  server.sendHeader(F("Location"), F("/"));
-  server.send(303);
 }
 
 // ============================================================================
@@ -1525,7 +1441,6 @@ void logStatistics() {
     case MODE_HEATING: Serial.println(F("HEATING")); break;
     case MODE_COOLING: Serial.println(F("COOLING")); break;
     case MODE_COOLDOWN: Serial.println(F("COOLDOWN")); break;
-    case MODE_FAULT: Serial.println(F("FAULT")); break;
   }
   
   Serial.print(F("Total Heating Cycles: "));
