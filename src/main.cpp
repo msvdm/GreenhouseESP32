@@ -174,6 +174,11 @@ struct SystemStats {
   float maxTempRecorded = -999.0;
   unsigned long lastResetTime = 0;
   unsigned long safetyShutdownCount = 0;
+  unsigned long heaterSensorFailures = 0;
+  unsigned long heaterCriticalEvents = 0;
+  unsigned long heaterSafetyEvents = 0;
+  unsigned long airSensorFailures = 0;
+  unsigned long invalidReadingEvents = 0;
 } stats;
 
 // ============================================================================
@@ -399,6 +404,7 @@ void loop() {
   if (currentMillis - lastStatsLog >= STATS_LOG_INTERVAL) {
     lastStatsLog = currentMillis;
     logStatistics();
+    esp_task_wdt_reset();  // Reset after potentially long operation
   }
 
   // Save statistics periodically (prevent data loss on power failure)
@@ -406,13 +412,18 @@ void loop() {
     lastStatsSave = currentMillis;
     saveSettings();
     Serial.println(F("💾 Periodic stats save"));
+    esp_task_wdt_reset();  // Reset after EEPROM write (can be slow)
   }
 
   // Save settings if changed (debounced)
   if (settingsChangedTime > 0 && (currentMillis - settingsChangedTime) >= EEPROM_SAVE_DELAY) {
     saveSettings();
     settingsChangedTime = 0;
+    esp_task_wdt_reset();  // Reset after EEPROM write
   }
+
+  // Always reset watchdog at end of loop to prevent random restarts
+  esp_task_wdt_reset();
 
   delay(10);  // Prevent tight looping
 }
@@ -456,10 +467,23 @@ void readHeaterTemperature() {
     Serial.println(F("C - FAN LIMIT EXCEEDED"));
     safetyShutdown("Heater critical temperature");
   } else if (heaterTemp >= HEATER_SAFETY_MAX && heaterOn) {
+    // Safety limit reached - force cooldown but don't trigger fault
     Serial.print(F("⚠ WARNING: Heater temp "));
     Serial.print(heaterTemp, 1);
-    Serial.println(F("C - Safety limit reached"));
-    safetyShutdown("Heater safety temperature exceeded");
+    Serial.println(F("C - Safety limit, forcing cooldown"));
+
+    // Turn off heater and enter cooldown mode
+    heaterOn = false;
+    digitalWrite(HEATER_SSR_PIN, LOW);
+    inCooldownMode = true;
+    fanCooldownStart = millis();
+    currentMode = MODE_COOLDOWN;
+
+    // Track this event in statistics
+    stats.heaterSafetyEvents++;
+
+    unsigned long runtime = millis() - heaterStartTime;
+    stats.totalHeaterRuntime += runtime;
   }
 }
 
@@ -546,18 +570,6 @@ void controlSystem() {
   if (averageTemp <= -100.0 || heaterTemp <= -100.0 || !heaterSensorDetected) {
     if (heaterOn || (fansOn && !inCooldownMode)) {
       safetyShutdown("Invalid sensor readings");
-    }
-    return;
-  }
-
-  // SAFETY: Check if system is in fault state
-  if (systemFault) {
-    // Keep everything off
-    if (heaterOn || fansOn) {
-      digitalWrite(HEATER_SSR_PIN, LOW);
-      digitalWrite(FAN_RELAY_PIN, LOW);
-      heaterOn = false;
-      fansOn = false;
     }
     return;
   }
@@ -796,26 +808,42 @@ bool checkHeatingCycleLimit() {
 }
 
 // ============================================================================
-// SAFETY SHUTDOWN - IMMEDIATE EMERGENCY STOP
+// SAFETY SHUTDOWN - IMMEDIATE EMERGENCY STOP WITH AUTO-RECOVERY
 // ============================================================================
 void safetyShutdown(String reason) {
+  // Immediately shut down heater and fans
+  digitalWrite(HEATER_SSR_PIN, LOW);
+  digitalWrite(FAN_RELAY_PIN, LOW);
+
   heaterOn = false;
   fansOn = false;
   inCooldownMode = false;
-  systemFault = true;
-  faultReason = reason;
-  
-  digitalWrite(HEATER_SSR_PIN, LOW);
-  digitalWrite(FAN_RELAY_PIN, LOW);
-  
-  currentMode = MODE_FAULT;
+
+  // Log to statistics but don't enter fault mode
   stats.safetyShutdownCount++;
-  
+
+  // Categorize the error for detailed tracking
+  if (reason.indexOf("Heater sensor") >= 0) {
+    stats.heaterSensorFailures++;
+  } else if (reason.indexOf("critical") >= 0) {
+    stats.heaterCriticalEvents++;
+  } else if (reason.indexOf("safety") >= 0) {
+    stats.heaterSafetyEvents++;
+  } else if (reason.indexOf("air sensor") >= 0) {
+    stats.airSensorFailures++;
+  } else if (reason.indexOf("Invalid") >= 0) {
+    stats.invalidReadingEvents++;
+  }
+
+  // Set to IDLE mode instead of FAULT - system will auto-recover
+  currentMode = MODE_IDLE;
+
   Serial.println(F("\n╔════════════════════════════════════════╗"));
-  Serial.println(F("║     🚨 SAFETY SHUTDOWN 🚨              ║"));
+  Serial.println(F("║     ⚠ SAFETY EVENT - AUTO-RECOVERY ⚠  ║"));
   Serial.println(F("╚════════════════════════════════════════╝"));
   Serial.print(F("Reason: "));
   Serial.println(reason);
+  Serial.println(F("System shutdown - will auto-resume when safe"));
   Serial.println();
 }
 
@@ -1346,6 +1374,31 @@ void handleStats() {
     html += String(stats.safetyShutdownCount);
     html += F("</span></div>");
 
+    html += F("</div>");
+
+    // Safety Events Detail
+    html += F("<div class='card'><h2 style='color:#FF6B6B;'>Safety Events Breakdown</h2>");
+
+    html += F("<div class='stat'><span class='label'>Heater Sensor Failures:</span><span class='value'>");
+    html += String(stats.heaterSensorFailures);
+    html += F("</span></div>");
+
+    html += F("<div class='stat'><span class='label'>Heater Critical Events (≥50C):</span><span class='value'>");
+    html += String(stats.heaterCriticalEvents);
+    html += F("</span></div>");
+
+    html += F("<div class='stat'><span class='label'>Heater Safety Events (≥35C):</span><span class='value'>");
+    html += String(stats.heaterSafetyEvents);
+    html += F("</span></div>");
+
+    html += F("<div class='stat'><span class='label'>Air Sensor Failures:</span><span class='value'>");
+    html += String(stats.airSensorFailures);
+    html += F("</span></div>");
+
+    html += F("<div class='stat'><span class='label'>Invalid Reading Events:</span><span class='value'>");
+    html += String(stats.invalidReadingEvents);
+    html += F("</span></div>");
+
     xSemaphoreGive(dataMutex);
   }
 
@@ -1380,6 +1433,11 @@ void handleResetStats() {
     stats.totalCoolingCycles = 0;
     stats.totalHeaterRuntime = 0;
     stats.safetyShutdownCount = 0;
+    stats.heaterSensorFailures = 0;
+    stats.heaterCriticalEvents = 0;
+    stats.heaterSafetyEvents = 0;
+    stats.airSensorFailures = 0;
+    stats.invalidReadingEvents = 0;
     stats.minTempRecorded = 999.0;
     stats.maxTempRecorded = -999.0;
 
@@ -1388,7 +1446,7 @@ void handleResetStats() {
 
     xSemaphoreGive(dataMutex);
 
-    Serial.println(F("📊 Statistics reset to defaults"));
+    Serial.println(F("Statistics reset to defaults"));
   }
 
   server.sendHeader(F("Location"), F("/stats"));
@@ -1400,18 +1458,23 @@ void handleResetStats() {
 // ============================================================================
 void loadSettings() {
   preferences.begin("greenhouse", false);
-  
+
   TEMP_MIN = preferences.getFloat("temp_min", 10.0);
   TEMP_MAX = preferences.getFloat("temp_max", 25.0);
   HEATER_SAFETY_MAX = preferences.getFloat("heater_max", 35.0);
-  
+
   stats.totalHeatingCycles = preferences.getULong("heat_cycles", 0);
   stats.totalCoolingCycles = preferences.getULong("cool_cycles", 0);
   stats.totalHeaterRuntime = preferences.getULong("heat_runtime", 0);
   stats.safetyShutdownCount = preferences.getULong("shutdowns", 0);
-  
+  stats.heaterSensorFailures = preferences.getULong("h_sens_fail", 0);
+  stats.heaterCriticalEvents = preferences.getULong("h_critical", 0);
+  stats.heaterSafetyEvents = preferences.getULong("h_safety", 0);
+  stats.airSensorFailures = preferences.getULong("a_sens_fail", 0);
+  stats.invalidReadingEvents = preferences.getULong("inv_read", 0);
+
   preferences.end();
-  
+
   Serial.println(F("✓ Settings loaded from EEPROM"));
 }
 
@@ -1420,18 +1483,23 @@ void loadSettings() {
 // ============================================================================
 void saveSettings() {
   preferences.begin("greenhouse", false);
-  
+
   preferences.putFloat("temp_min", TEMP_MIN);
   preferences.putFloat("temp_max", TEMP_MAX);
   preferences.putFloat("heater_max", HEATER_SAFETY_MAX);
-  
+
   preferences.putULong("heat_cycles", stats.totalHeatingCycles);
   preferences.putULong("cool_cycles", stats.totalCoolingCycles);
   preferences.putULong("heat_runtime", stats.totalHeaterRuntime);
   preferences.putULong("shutdowns", stats.safetyShutdownCount);
-  
+  preferences.putULong("h_sens_fail", stats.heaterSensorFailures);
+  preferences.putULong("h_critical", stats.heaterCriticalEvents);
+  preferences.putULong("h_safety", stats.heaterSafetyEvents);
+  preferences.putULong("a_sens_fail", stats.airSensorFailures);
+  preferences.putULong("inv_read", stats.invalidReadingEvents);
+
   preferences.end();
-  
+
   Serial.println(F("Settings saved to EEPROM"));
 }
 
