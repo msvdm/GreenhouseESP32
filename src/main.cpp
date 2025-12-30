@@ -131,8 +131,14 @@ unsigned long heaterTotalRuntime = 0;       // Total runtime this session
 unsigned long lastHeaterOffTime = 0;        // When heater was last turned off
 unsigned long fanStartTime = 0;             // When fans were turned on
 unsigned long fanCooldownStart = 0;         // Cooldown timer
-unsigned long lastSensorFailureTime = 0;    // Grace period for transient sensor errors
+unsigned long lastHeaterSensorFailureTime = 0;    // Grace period for heater sensor errors
+unsigned long lastAirSensorFailureTime = 0;       // Grace period for air sensor errors
 unsigned long settingsChangedTime = 0;      // Debounce EEPROM writes
+
+// Temperature validation
+float lastValidHeaterTemp = -127.0;         // Last known good heater reading
+unsigned long lastHeaterTempUpdate = 0;     // When we last got valid heater temp
+int heaterSensorConsecutiveFailures = 0;    // Count consecutive bad reads
 
 // Cycle tracking (sliding window - last hour)
 #define CYCLE_HISTORY_SIZE 10
@@ -433,27 +439,78 @@ void readHeaterTemperature() {
   heaterSensor.requestTemperatures();
   float temp = heaterSensor.getTempC(heaterSensorAddress);
 
-  // Check if reading is valid
-  if (temp == DEVICE_DISCONNECTED_C || temp < -50 || temp > 100) {
-    Serial.println(F("⚠ HEATER SENSOR READ ERROR"));
+  // CRITICAL FIX: Catch sensor failures while allowing normal operation
+  // DS18B20 returns 85.0 on power-up/error, -127 on disconnect
+  bool isInvalid = false;
+
+  if (temp == DEVICE_DISCONNECTED_C || temp == -127.0) {
+    Serial.println(F("⚠ HEATER SENSOR DISCONNECTED"));
+    isInvalid = true;
+  } else if (temp == 85.0) {
+    // 85C is DS18B20 power-on reset value - VERY unlikely to be real temperature
+    Serial.println(F("⚠ HEATER SENSOR POWER-ON VALUE (85C) - ignoring"));
+    isInvalid = true;
+  } else if (temp < -50 || temp > 100) {
+    // Physically impossible range
+    Serial.print(F("⚠ HEATER SENSOR OUT OF RANGE: "));
+    Serial.print(temp, 1);
+    Serial.println(F("C"));
+    isInvalid = true;
+  } else if (lastValidHeaterTemp > -100 && (millis() - lastHeaterTempUpdate) < 60000) {
+    // Sanity check: reject impossible temperature spikes
+    // Only if last reading was recent (within 60s) to allow startup
+    float tempChange = abs(temp - lastValidHeaterTemp);
+    if (tempChange > 30.0) {
+      // 30C jump in 1 second = physically impossible with thermal mass
+      Serial.print(F("⚠ HEATER SENSOR SPIKE DETECTED: "));
+      Serial.print(lastValidHeaterTemp, 1);
+      Serial.print(F("C → "));
+      Serial.print(temp, 1);
+      Serial.print(F("C ("));
+      Serial.print(tempChange, 1);
+      Serial.println(F("C change - rejecting)"));
+      isInvalid = true;
+    }
+  }
+
+  if (isInvalid) {
+    heaterSensorConsecutiveFailures++;
+
+    // Keep last known good temperature instead of immediately going to -127
+    // This prevents brief glitches from disrupting the system
+    if (heaterSensorConsecutiveFailures < 3) {
+      // Use last valid reading for first 2 failures (allows 2-second grace)
+      Serial.print(F("   Using last valid temp: "));
+      Serial.print(lastValidHeaterTemp, 1);
+      Serial.print(F("C (failure "));
+      Serial.print(heaterSensorConsecutiveFailures);
+      Serial.println(F("/3)"));
+      return; // Keep using old temperature
+    }
+
+    // After 3 consecutive failures, mark as invalid
     heaterTemp = -127.0;
 
-    // Grace period before shutdown
-    if (lastSensorFailureTime == 0) {
-      lastSensorFailureTime = millis();
-    } else if (millis() - lastSensorFailureTime >= SENSOR_FAILURE_GRACE_PERIOD) {
+    // Grace period before shutdown (SEPARATE timer for heater sensor)
+    if (lastHeaterSensorFailureTime == 0) {
+      lastHeaterSensorFailureTime = millis();
+      Serial.println(F("⏳ Heater sensor grace period started (30s)"));
+    } else if (millis() - lastHeaterSensorFailureTime >= SENSOR_FAILURE_GRACE_PERIOD) {
       safetyShutdown("Heater sensor failure");
     }
     return;
   }
 
-  // Reset grace period on successful read
-  lastSensorFailureTime = 0;
+  // Valid reading received - reset failure counters
+  heaterSensorConsecutiveFailures = 0;
+  lastHeaterSensorFailureTime = 0;
+  lastValidHeaterTemp = temp;
+  lastHeaterTempUpdate = millis();
 
-  // Update temperature - trust the sensor
+  // Update temperature
   heaterTemp = temp;
 
-  // Safety checks
+  // Safety checks - ONLY on validated readings
   if (heaterTemp >= HEATER_CRITICAL_MAX) {
     Serial.print(F("🚨 CRITICAL: Heater temp "));
     Serial.print(heaterTemp, 1);
@@ -532,25 +589,26 @@ void calculateAverage() {
   
   if (validCount >= 1) {
     averageTemp = sum / validCount;
-    
+
     // Update statistics
     if (averageTemp < stats.minTempRecorded) stats.minTempRecorded = averageTemp;
     if (averageTemp > stats.maxTempRecorded) stats.maxTempRecorded = averageTemp;
+
+    // Reset grace period on successful read
+    lastAirSensorFailureTime = 0;
   } else {
     Serial.println(F("⚠ ERROR: No valid air sensors"));
     averageTemp = -127.0;
-    
-    // Grace period before shutdown
-    if (lastSensorFailureTime == 0) {
-      lastSensorFailureTime = millis();
-    } else if (millis() - lastSensorFailureTime >= SENSOR_FAILURE_GRACE_PERIOD) {
+
+    // Grace period before shutdown (SEPARATE timer for air sensors)
+    if (lastAirSensorFailureTime == 0) {
+      lastAirSensorFailureTime = millis();
+      Serial.println(F("⏳ Air sensor grace period started (30s)"));
+    } else if (millis() - lastAirSensorFailureTime >= SENSOR_FAILURE_GRACE_PERIOD) {
       safetyShutdown("All air sensors failed");
     }
     return;
   }
-  
-  // Reset grace period on successful read
-  lastSensorFailureTime = 0;
 }
 
 // ============================================================================
