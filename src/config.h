@@ -56,6 +56,17 @@ extern const char* FIRMWARE_VERSION;
 #define SENSOR_FAILURE_GRACE_PERIOD 30000UL  // 30 s grace before shutdown
 #define CYCLE_WINDOW 3600000UL             // Sliding window for the cycle limit
 
+// Plausibility band for an operator-entered simulated temperature. Nothing in
+// a greenhouse legitimately reads outside this, and a typo that lands outside
+// it should be refused rather than fed to the control logic.
+#define SIM_TEMP_MIN -40.0f
+#define SIM_TEMP_MAX 100.0f
+
+// A simulated reading expires by itself. Manual mode is sticky because the
+// operator can see the relays; a forgotten override is invisible and would go
+// on feeding the controller invented weather indefinitely.
+#define SIM_TIMEOUT 900000UL               // 15 min, then simulation clears
+
 // ============================================================================
 // TIMING INTERVALS
 // ============================================================================
@@ -65,6 +76,12 @@ extern const char* FIRMWARE_VERSION;
 #define STATS_LOG_INTERVAL 300000UL        // Log statistics every 5 min
 #define STATS_SAVE_INTERVAL 3600000UL      // Persist statistics hourly
 #define EEPROM_SAVE_DELAY 10000UL          // Debounce settings writes by 10 s
+
+// How long a new WiFi configuration runs on trial before reverting itself.
+// The same bargain a router offers: prove you can still reach the box, or it
+// puts the working settings back without you.
+#define WIFI_TRIAL_WINDOW 60000UL          // 60 s to confirm
+#define WIFI_TRIAL_APPLY_DELAY 400UL       // Let the HTTP reply leave first
 
 #define WATCHDOG_TIMEOUT_S 20
 
@@ -79,9 +96,45 @@ struct Settings {
   float tempMax        = 25.0f;   // Start cooling above this
   float heaterMax      = 35.0f;   // Heater zone limit - sheds the element
   float heaterCritical = 50.0f;   // Fan's rated ambient - sheds everything
+
+  // Operator intent, not machine state: "the controller should be under manual
+  // control". Persisted like any other setting, so it survives a reboot. What
+  // is deliberately NOT persisted is any output request - see control.h.
+  bool manualMode = false;
 };
 
 extern Settings settings;
+
+// ============================================================================
+// NETWORK CONFIGURATION
+// ============================================================================
+// Editable from the web UI and stored in NVS. secrets.h supplies the FACTORY
+// values only - once a configuration has been committed here, that is what the
+// board comes up on.
+#define WIFI_SSID_LEN 33   // 32 characters + NUL
+#define WIFI_PASS_LEN 64   // 63 characters + NUL (WPA2 maximum)
+
+struct WifiConfig {
+  bool staEnabled = false;              // Join an existing network as well
+  char apSsid[WIFI_SSID_LEN]  = { 0 };  // The board's own access point
+  char apPass[WIFI_PASS_LEN]  = { 0 };
+  char staSsid[WIFI_SSID_LEN] = { 0 };  // The network to join, when enabled
+  char staPass[WIFI_PASS_LEN] = { 0 };
+};
+
+// The compiled-in factory configuration, from secrets.h.
+WifiConfig factoryWifiConfig();
+
+void loadWifiConfig(WifiConfig& cfg);
+void saveWifiConfig(const WifiConfig& cfg);
+
+// The direct analogue of clampSetpoints(), and it exists for the same reason:
+// NVS and HTTP form fields are both untrusted input. An SSID must be 1-32
+// characters and a password must be either empty (open network) or 8-63, which
+// is what the radio itself will accept. Anything else falls back to the
+// factory value rather than being silently truncated into something that
+// almost works. Returns false if it had to change anything.
+bool validateWifiConfig(WifiConfig& cfg);
 
 // ============================================================================
 // STATISTICS

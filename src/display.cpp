@@ -42,7 +42,18 @@ void displaySplash(int numLeft, int numRight, bool heaterDetected) {
 
 void displayNetwork(const String& ip) {
   networkLine = ip;
-  tft.printf("IP: %s\n", ip.c_str());
+
+  // During startup this is still part of the splash, printed at the cursor
+  // the splash left behind.
+  if (!chromeDrawn) {
+    tft.printf("IP: %s\n", ip.c_str());
+    return;
+  }
+
+  // Called again later - a WiFi change applied at runtime. Printing here
+  // would land wherever the cursor happens to be, so mark the chrome dirty
+  // and let the normal repaint own the screen.
+  chromeDrawn = false;
 }
 
 void updateDisplay() {
@@ -100,6 +111,14 @@ void updateDisplay() {
   tft.printf("Fan: %s  ", fansOn ? "ON" : "OFF");
   tft.setTextColor(activeFault ? ST77XX_RED : ST77XX_YELLOW);
   tft.print(modeName(currentMode));
+
+  // If a simulated value is armed, the little screen and the web page are
+  // reporting different temperatures. That has to be visible from the doorway,
+  // not only to whoever is holding the phone.
+  if (sim.airActive || sim.heaterActive) {
+    tft.setTextColor(ST77XX_MAGENTA);
+    tft.print(F(" SIM"));
+  }
 
   clearRow(ROW_LEFT, 24);
   tft.setTextColor(ST77XX_CYAN);

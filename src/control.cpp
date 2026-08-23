@@ -6,6 +6,11 @@ Fault activeFault = FAULT_NONE;
 bool heaterOn = false;
 bool fansOn = false;
 
+bool manualHeaterReq = false;
+bool manualFanReq = false;
+SimOverride sim;
+static const char* manualHold = "";
+
 static unsigned long heaterStartTime = 0;
 static unsigned long lastHeaterOffTime = 0;
 static unsigned long fanStartTime = 0;
@@ -21,8 +26,37 @@ const char* modeName(SystemMode m) {
     case MODE_HEATING:  return "HEATING";
     case MODE_COOLING:  return "COOLING";
     case MODE_COOLDOWN: return "COOLDOWN";
+    case MODE_MANUAL:   return "MANUAL";
   }
   return "?";
+}
+
+// ============================================================================
+// SENSOR VALUES AS THE CONTROL LOGIC SEES THEM
+// ============================================================================
+// The asymmetry between these two functions is the whole safety argument for
+// the simulation feature, so it is spelled out rather than left to be noticed.
+
+// Air is not a safety input. It answers "should we want heat?", and every
+// protection that matters sits downstream of that answer, so an operator may
+// override it in either direction.
+static float airTempForControl() {
+  return sim.airActive ? sim.air : sensorData.averageTemp;
+}
+
+// The heater zone IS the safety input, so its override is one-directional:
+// max() means a simulated value can only ever report the element HOTTER than
+// it really is. That trips the protections early - harmless, and exactly what
+// you want to be able to test. The reverse would mask a hot element and
+// silently remove the critical trip, which is the single worst thing this
+// feature could have been allowed to do.
+//
+// And if the real sensor is not readable the override does not apply at all: a
+// failed heater sensor must still fault, whatever the operator typed in.
+static float heaterTempForControl() {
+  const float real = sensorData.heaterTemp;
+  if (!sim.heaterActive || !TEMP_IS_VALID(real)) return real;
+  return max(real, sim.heater);
 }
 
 // ============================================================================
@@ -76,6 +110,118 @@ void controlBegin() {
 }
 
 // ============================================================================
+// MANUAL MODE
+// ============================================================================
+// A safety path has taken the element away from the operator. Drop the manual
+// heater request so it cannot silently re-arm the instant the condition
+// clears - a shutdown nobody asked for should need a deliberate press to
+// undo - and set the fan request to whatever that path decided, because
+// driveManual() would otherwise override it on the very next pass. That last
+// part matters most on the critical trip, which deliberately does NOT
+// ventilate: leaving the fan request standing would restart the fan past its
+// own rated ambient.
+static void manualSafetyShed(bool ventilate) {
+  if (!settings.manualMode) return;
+  manualHeaterReq = false;
+  manualFanReq = ventilate;
+}
+
+void setManualMode(bool on, unsigned long now) {
+  if (on == settings.manualMode) return;
+  settings.manualMode = on;
+
+  if (on) {
+    // Seed the fan request from the actual output so switching to manual in
+    // the middle of a purge does not cut the purge short. The heater always
+    // starts from OFF: entering manual must never be a route to keeping an
+    // element energised.
+    manualFanReq = fansOn;
+    manualHeaterReq = false;
+  } else {
+    manualHeaterReq = false;
+    manualFanReq = false;
+    setHeater(false, now);
+
+    // Hand back to the automatic machine with a purge if there is residual
+    // heat. setHeater() has just stamped lastHeaterOffTime, so the five-minute
+    // rest that manual mode bypasses applies again from this moment.
+    if (fansOn) {
+      currentMode = MODE_COOLDOWN;
+      fanCooldownStart = now;
+    } else {
+      currentMode = MODE_IDLE;
+    }
+  }
+
+  manualHold = "";
+  settingsChangedTime = (now == 0) ? 1 : now;   // debounced write, handled by loop()
+  Serial.printf("Control mode: %s\n", on ? "MANUAL" : "AUTOMATIC");
+}
+
+// Both apply to the relays immediately rather than waiting up to five seconds
+// for the next control pass. A test switch that appears to do nothing for five
+// seconds gets pressed again, and pressing a 2200 W heater switch twice
+// because it looked broken is not a failure mode worth having.
+void setManualHeater(bool on, unsigned long now) {
+  if (!settings.manualMode) return;
+  manualHeaterReq = on;
+
+  // Switching ON only starts the fans - the element itself is left to
+  // driveManual(), which is where the interlocks live. Timing the airflow
+  // delay from the press rather than from the next pass just means the
+  // operator waits five seconds instead of up to ten.
+  if (on) setFans(true, now);
+  else    setHeater(false, now);
+}
+
+void setManualFan(bool on, unsigned long now) {
+  if (!settings.manualMode) return;
+  manualFanReq = on;
+  setFans(on || manualHeaterReq, now);   // the heater's requirement still wins
+}
+
+const char* manualHoldReason() { return manualHold; }
+
+// ============================================================================
+// SIMULATED SENSORS
+// ============================================================================
+static bool simValueOk(float v) { return v >= SIM_TEMP_MIN && v <= SIM_TEMP_MAX; }
+
+bool setSimAir(bool on, float value) {
+  if (on && !simValueOk(value)) return false;
+  sim.airActive = on;
+  if (on) { sim.air = value; sim.armedAt = millis(); }
+  return true;
+}
+
+bool setSimHeater(bool on, float value) {
+  if (on && !simValueOk(value)) return false;
+  sim.heaterActive = on;
+  if (on) { sim.heater = value; sim.armedAt = millis(); }
+  return true;
+}
+
+void clearSim() { sim = SimOverride(); }
+
+unsigned long simSecondsLeft() {
+  if (!sim.airActive && !sim.heaterActive) return 0;
+  const unsigned long elapsed = millis() - sim.armedAt;
+  if (elapsed >= SIM_TIMEOUT) return 0;
+  return (SIM_TIMEOUT - elapsed) / 1000;
+}
+
+// Simulation is a test aid, and a test aid that outlives the test is a hazard.
+// Manual mode is allowed to be sticky because the operator can hear the relays
+// and see the light-grey page; an override quietly replacing the greenhouse
+// temperature is invisible, so it gets an expiry instead.
+static void expireSim(unsigned long now) {
+  if (!sim.airActive && !sim.heaterActive) return;
+  if ((now - sim.armedAt) < SIM_TIMEOUT) return;
+  clearSim();
+  Serial.println(F("Simulation expired - real sensor readings restored"));
+}
+
+// ============================================================================
 // FAULT HANDLING
 // ============================================================================
 // Each fault names its own response. The distinction that matters is
@@ -98,6 +244,8 @@ static const FaultPolicy FAULT_POLICY[] = {
   { "Invalid sensor data",   &SystemStats::invalidReadingEvents,   true  },
 };
 
+const char* faultName(Fault f) { return FAULT_POLICY[f].name; }
+
 static void enterFault(Fault f, unsigned long now) {
   // Decided BEFORE the heater is shed, because shedding it stamps
   // lastHeaterOffTime: is there residual heat that actually needs purging?
@@ -117,7 +265,8 @@ static void enterFault(Fault f, unsigned long now) {
   stats.safetyShutdownCount++;
   if (p.counter) (stats.*(p.counter))++;
 
-  if (p.ventilate && residualHeat) {
+  const bool ventilate = p.ventilate && residualHeat;
+  if (ventilate) {
     setFans(true, now);
     fanCooldownStart = now;
     currentMode = MODE_COOLDOWN;
@@ -125,6 +274,7 @@ static void enterFault(Fault f, unsigned long now) {
     setFans(false, now);
     currentMode = MODE_IDLE;
   }
+  manualSafetyShed(ventilate);
 
   Serial.println(F("\n=== SAFETY EVENT - AUTO-RECOVERY ==="));
   Serial.printf("Reason: %s\n", p.name);
@@ -139,6 +289,7 @@ void forceSafeState(bool ventilate) {
   setFans(ventilate, now);
   currentMode = ventilate ? MODE_COOLDOWN : MODE_IDLE;
   if (ventilate) fanCooldownStart = now;
+  manualSafetyShed(ventilate);
 }
 
 // ============================================================================
@@ -162,7 +313,10 @@ static bool heatingCycleLimitOk(unsigned long now) {
 // effects: every actuator change is made by applyMode() below, so the
 // hysteresis rules can be read and changed without tracing relay writes.
 static SystemMode decideMode(unsigned long now) {
-  const float avg = sensorData.averageTemp;
+  // Operator intent outranks the temperature band entirely.
+  if (settings.manualMode) return MODE_MANUAL;
+
+  const float avg = airTempForControl();
 
   if (currentMode == MODE_COOLDOWN) {
     // An over-temperature during the purge outranks finishing the purge.
@@ -214,14 +368,55 @@ static void driveHeating(unsigned long now) {
   }
 
   // Interlock 4: heater zone must be plausibly cool, with margin.
-  if (sensorData.heaterTemp <= 0.0f ||
-      sensorData.heaterTemp >= settings.heaterMax - HEATER_ARM_MARGIN) {
+  const float heat = heaterTempForControl();
+  if (heat <= 0.0f || heat >= settings.heaterMax - HEATER_ARM_MARGIN) {
     return;
   }
 
   setHeater(true, now);
-  Serial.printf("Heater ON: avg=%.1fC heater=%.1fC\n",
-                sensorData.averageTemp, sensorData.heaterTemp);
+  Serial.printf("Heater ON: avg=%.1fC heater=%.1fC\n", airTempForControl(), heat);
+}
+
+// Manual execution. Interlocks 1 and 2 - the five-minute rest and the
+// cycles-per-hour cap - are deliberately bypassed here so the system can be
+// exercised repeatedly during a test. Everything that protects the hardware
+// rather than its duty cycle stays exactly as it is in automatic: airflow
+// before heat, a valid heater-zone reading, the zone limit with its margin,
+// and (from controlSystem) the thirty-minute runtime cap.
+//
+// Bypassing those two does not stop them being RECORDED. setHeater() still
+// stamps lastHeaterOffTime and the cycle history, so returning to automatic
+// applies both limits immediately, counting the manual cycles as history.
+static void driveManual(unsigned long now) {
+  // A heater request implies airflow whatever the fan toggle says.
+  setFans(manualFanReq || manualHeaterReq, now);
+
+  if (!manualHeaterReq) {
+    setHeater(false, now);
+    manualHold = "";
+    return;
+  }
+
+  if (now - fanStartTime < FAN_STARTUP_DELAY) {
+    manualHold = "proving airflow";
+    return;
+  }
+
+  // The real sensor, through the upward-only override. No path here lets a
+  // simulated value energise an element that should stay off.
+  const float heat = heaterTempForControl();
+  if (!TEMP_IS_VALID(heat) || heat <= 0.0f) {
+    manualHold = "no heater zone reading";
+    return;
+  }
+  if (heat >= settings.heaterMax - HEATER_ARM_MARGIN) {
+    manualHold = "heater zone too hot";
+    return;
+  }
+
+  manualHold = "";
+  if (!heaterOn) Serial.printf("MANUAL heater ON: heater=%.1fC\n", heat);
+  setHeater(true, now);
 }
 
 static void driveCooling(unsigned long now) {
@@ -229,7 +424,7 @@ static void driveCooling(unsigned long now) {
   if (!fansOn) {
     setFans(true, now);
     stats.totalCoolingCycles++;
-    Serial.printf("COOLING: %.1fC\n", sensorData.averageTemp);
+    Serial.printf("COOLING: %.1fC\n", airTempForControl());
   }
 }
 
@@ -254,6 +449,7 @@ static void applyMode(SystemMode target, unsigned long now) {
     case MODE_HEATING:  driveHeating(now);  break;
     case MODE_COOLING:  driveCooling(now);  break;
     case MODE_COOLDOWN: driveCooldown(now); break;
+    case MODE_MANUAL:   driveManual(now);   break;
     case MODE_IDLE:     driveIdle(now);     break;
   }
 }
@@ -262,11 +458,14 @@ static void applyMode(SystemMode target, unsigned long now) {
 // FAST SAFETY TICK (1 Hz)
 // ============================================================================
 void safetyTick(unsigned long now) {
-  if (!TEMP_IS_VALID(sensorData.heaterTemp)) {
+  const float heat = heaterTempForControl();
+
+  if (!TEMP_IS_VALID(heat)) {
     // The element's temperature cannot be verified. Shed it here at 1 Hz
     // rather than waiting up to 5 s for the next full control pass.
     if (heaterOn) {
       Serial.println(F("Heater zone reading invalid - shedding element"));
+      manualSafetyShed(true);
       applyMode(MODE_COOLDOWN, now);
     }
     // Escalate to a named sensor fault once the grace period has expired.
@@ -274,20 +473,19 @@ void safetyTick(unsigned long now) {
     return;
   }
 
-  if (sensorData.heaterTemp >= settings.heaterCritical) {
-    Serial.printf("CRITICAL: heater zone %.1fC exceeds fan rated ambient\n",
-                  sensorData.heaterTemp);
+  if (heat >= settings.heaterCritical) {
+    Serial.printf("CRITICAL: heater zone %.1fC exceeds fan rated ambient\n", heat);
     enterFault(FAULT_HEATER_CRITICAL, now);
     return;
   }
 
-  if (sensorData.heaterTemp >= settings.heaterMax && heaterOn) {
+  if (heat >= settings.heaterMax && heaterOn) {
     // Over the element limit but below the fan's: shed the heater and purge.
     // Routed through applyMode so runtime accounting and the minimum-off-time
     // interlock are applied here exactly as on every other shutdown path.
-    Serial.printf("Heater zone %.1fC at safety limit - forcing cooldown\n",
-                  sensorData.heaterTemp);
+    Serial.printf("Heater zone %.1fC at safety limit - forcing cooldown\n", heat);
     stats.heaterSafetyEvents++;
+    manualSafetyShed(true);
     applyMode(MODE_COOLDOWN, now);
   }
 }
@@ -296,28 +494,41 @@ void safetyTick(unsigned long now) {
 // MAIN CONTROL PASS (0.2 Hz)
 // ============================================================================
 void controlSystem(unsigned long now) {
-  // Gate: the controller may not operate on inputs it cannot trust.
+  // Before the gates, so an expiry still happens while a fault is latched.
+  expireSim(now);
+
+  // Gate: the controller may not operate on inputs it cannot trust. The heater
+  // zone gates read sensorData directly - the real probe, no override - so a
+  // simulated value can never satisfy one of them.
   if (!sensorData.heaterDetected || heaterSensorFailed()) {
     enterFault(FAULT_HEATER_SENSOR_LOST, now);
     return;
   }
-  if (airSensorsFailed()) {
+  // A simulated AIR temperature does satisfy the air-sensor gate. That is the
+  // point of it - exercising the mode machine on a bench with nothing but the
+  // heater-zone probe wired - and it is safe because every heater protection
+  // sits downstream of this and still reads the real sensor.
+  if (!sim.airActive && airSensorsFailed()) {
     enterFault(FAULT_AIR_SENSORS_LOST, now);
     return;
   }
-  if (!TEMP_IS_VALID(sensorData.averageTemp) || !TEMP_IS_VALID(sensorData.heaterTemp)) {
+  if (!TEMP_IS_VALID(airTempForControl()) || !TEMP_IS_VALID(sensorData.heaterTemp)) {
     enterFault(FAULT_INVALID_READINGS, now);
     return;
   }
 
   // Inputs are valid and the heater zone is within limits: release any latched
   // fault so a genuinely new event is counted and logged again.
-  if (sensorData.heaterTemp < settings.heaterMax) activeFault = FAULT_NONE;
+  if (heaterTempForControl() < settings.heaterMax) activeFault = FAULT_NONE;
 
   // Hard interlock: maximum continuous runtime. Routed through applyMode so it
   // gets the same cooldown entry handling as every other path into COOLDOWN.
+  // In manual it also drops the heater request: with the minimum rest
+  // bypassed, leaving that request standing would re-energise the element on
+  // the very next pass and make the cap meaningless.
   if (heaterOn && (now - heaterStartTime >= MAX_HEATER_RUNTIME)) {
     Serial.println(F("Max heater runtime reached - forcing cooldown"));
+    manualSafetyShed(true);
     applyMode(MODE_COOLDOWN, now);
     return;
   }
@@ -330,8 +541,10 @@ void controlSystem(unsigned long now) {
 // ============================================================================
 void logStatistics() {
   Serial.println(F("\n---------------- SYSTEM STATISTICS ----------------"));
-  Serial.printf("Average air : %.1fC\n", sensorData.averageTemp);
-  Serial.printf("Heater zone : %.1fC\n", sensorData.heaterTemp);
+  Serial.printf("Average air : %.1fC%s\n", sensorData.averageTemp,
+                sim.airActive ? "  [SIM ACTIVE]" : "");
+  Serial.printf("Heater zone : %.1fC%s\n", sensorData.heaterTemp,
+                sim.heaterActive ? "  [SIM ACTIVE]" : "");
   Serial.printf("Mode        : %s%s\n", modeName(currentMode),
                 activeFault ? "  [FAULT]" : "");
   Serial.printf("Heat cycles : %lu\n", stats.totalHeatingCycles);

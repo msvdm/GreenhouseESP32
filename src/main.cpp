@@ -10,21 +10,21 @@
 //   sensors.h  DS18B20 acquisition and validation
 //   control.h  relays, fault policy, mode machine   <- the only relay writer
 //   display.h  TFT status screen
+//   net.h      access point, optional station, WiFi trial/commit
 //   webui.h    static pages + /status JSON
 //   ota.h      firmware update (ArduinoOTA and browser upload)
 // ============================================================================
 
 #include <Arduino.h>
-#include <WiFi.h>
 #include <esp_task_wdt.h>
 
 #include "config.h"
 #include "control.h"
 #include "display.h"
+#include "net.h"
 #include "ota.h"
 #include "sensors.h"
 #include "webui.h"
-#include "secrets.h"
 
 // Periodic task bookkeeping. Each entry is "last time this ran".
 static unsigned long lastHeaterRead = 0;
@@ -32,17 +32,6 @@ static unsigned long lastAirRead = 0;
 static unsigned long lastDisplay = 0;
 static unsigned long lastStatsLog = 0;
 static unsigned long lastStatsSave = 0;
-
-// ----------------------------------------------------------------------------
-static void startAccessPoint() {
-  Serial.println(F("\n[WiFi] Starting access point"));
-  WiFi.mode(WIFI_AP);
-  WiFi.softAP(AP_SSID, AP_PASSWORD);
-
-  const String ip = WiFi.softAPIP().toString();
-  Serial.printf("  SSID: %s\n  IP:   %s\n", AP_SSID, ip.c_str());
-  displayNetwork(ip);
-}
 
 // ----------------------------------------------------------------------------
 void setup() {
@@ -63,7 +52,7 @@ void setup() {
   sensorsBegin();
   displaySplash(sensorData.numLeft, sensorData.numRight, sensorData.heaterDetected);
 
-  startAccessPoint();
+  netBegin();
   webBegin();
   otaBegin(webServer());
 
@@ -89,6 +78,14 @@ void loop() {
     esp_task_wdt_reset();
     return;
   }
+
+  // The WiFi trial timer, deliberately below the OTA gate: a revert restarts
+  // the access point, and doing that halfway through a firmware upload would
+  // drop the connection carrying it. An unconfirmed trial simply reverts once
+  // the update is over - or is forgotten entirely at the reboot, since the
+  // candidate never left RAM. Non-blocking, so a pending revert can never
+  // delay a heater-zone read.
+  netLoop(now);
 
   // Heater zone: read fast, and act on the critical trips at the same rate.
   if (now - lastHeaterRead >= HEATER_TEMP_READ_INTERVAL) {

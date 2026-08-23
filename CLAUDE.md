@@ -44,9 +44,10 @@ src/config.*     pins, limits, timings, Settings/SystemStats, NVS persistence
 src/sensors.*    DS18B20 acquisition and validation. Knows nothing about relays
 src/control.*    actuators, fault policy, mode machine — the ONLY relay writer
 src/display.*    ST7735 status screen
+src/net.*        AP + optional station, and the WiFi trial/commit machinery
 src/webui.*      static PROGMEM pages + /status JSON
 src/ota.*        ArduinoOTA + browser upload, with the safety preamble
-src/secrets.h    gitignored. Copy from secrets.h.example
+src/secrets.h    gitignored. FACTORY values only; live WiFi config is in NVS
 ```
 
 ## Rules that exist for a reason
@@ -77,8 +78,54 @@ polls anyway. Do not render values into HTML server-side — the old code did, a
 JavaScript overwrote every one of them two seconds later. Serve with `send_P`,
 never build pages with `String`.
 
+**Bump the `?v=` on `/style.css` and `/ui.js` whenever either changes.** They
+once carried a 24-hour `max-age`, and after an OTA browsers kept serving the old
+stylesheet against the new HTML - no `.switch`, no `.hidden`, so every element
+meant to be styled or concealed appeared raw. It reads as a catastrophically
+broken UI rather than a cache. `no-cache` on the response fixes it for the
+*next* update, never the one already in someone's browser; only changing the URL
+does that. Watch the `StaticJsonDocument` capacity in `handleStatusJSON()` when
+adding fields too - a truncated `/status` takes the whole UI down with it.
+
+**Manual mode adds no controls.** The existing badges and readouts become the
+controls, gated on `.tap`/`.simtap`. Resist adding a manual-only card: an earlier
+version had two, and they were both clutter and a second thing to keep in sync
+with the automatic UI.
+
 **`clampSetpoints()` after any setpoint change and after `loadSettings()`.**
 NVS is untrusted input. Individual ranges cannot express `tempMin < tempMax`.
+`validateWifiConfig()` is the same rule for the network settings, and is applied
+to form input as well as to NVS.
+
+**Simulated readings may only ever make the controller more cautious.** The air
+override is free in both directions - air decides whether to *want* heat, and
+every protection sits downstream of that. The heater-zone override goes through
+`max(real, simulated)` and does not apply at all when the real probe is
+unreadable, so it can trip the protections early but can never report the
+element cooler than it is. Remove that `max()` and a typed-in 20 C silently
+deletes the critical trip. If you add another simulated input, work out which
+side of this line it falls on before you write it.
+
+**Manual intent and current mode are separate facts, not duplicates.**
+`settings.manualMode` is what the operator asked for, and is persisted;
+`MODE_MANUAL` is what the machine is doing right now, and is not. They diverge
+whenever a fault is active - `enterFault()` drives the mode to IDLE or COOLDOWN,
+and `decideMode()` returns to MODE_MANUAL once the condition clears. This is not
+the `inCooldownMode` mistake above: that was two names for one fact, this is a
+setpoint and a temperature.
+
+**Manual mode persists across a reboot. Output requests never do.** Manual
+heater and fan requests, and both simulated values, start clear on every boot.
+A power blip must not be able to restore a latched heater relay unattended.
+Simulation additionally expires after `SIM_TIMEOUT`, because unlike manual mode
+it is invisible from across the greenhouse.
+
+**Web handlers set requests; `control.cpp` decides.** The manual endpoints are
+not an exception to the relay-writer rule - `/output` records what the operator
+asked for, and `driveManual()` applies the same interlocks every automatic path
+uses. Manual deliberately bypasses only the minimum rest and the cycles-per-hour
+cap, and even those are still recorded, so automatic applies them again the
+moment it takes over.
 
 ## Working here
 
