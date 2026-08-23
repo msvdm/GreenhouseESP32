@@ -101,7 +101,7 @@ Each OneWire bus wants its own 4.7 kΩ pull-up to 3V3.
 ## 🚀 Getting started
 
 ```bash
-git clone https://github.com/klmnr/GreenhouseESP32.git
+git clone https://github.com/msvdm/GreenhouseESP32.git
 cd GreenhouseESP32
 cp src/secrets.h.example src/secrets.h    # then edit it
 pio run -e esp32dev -t upload
