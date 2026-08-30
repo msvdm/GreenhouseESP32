@@ -1,6 +1,7 @@
 #include "webui.h"
 #include <ArduinoJson.h>
 #include <WiFi.h>          // scan results, read directly in handleWifiScan()
+#include "auth.h"
 #include "config.h"
 #include "control.h"
 #include "net.h"
@@ -88,6 +89,16 @@ input[type=text],input[type=password],select{width:100%;box-sizing:border-box;pa
   box-shadow:0 4px 20px rgba(0,0,0,.6);}
 .overlay h2{margin-top:0;}
 
+/* The default-password nag. Deliberately loud and deliberately not dismissable:
+   it is the one thing standing between a stranger on the network and 2200 W. */
+.banner{background:#5a1a1a;border:2px solid #f44336;color:#ffd7d7;padding:12px;
+  border-radius:8px;margin:10px 0;font-size:14px;}
+.banner b{color:#fff;}
+.banner .btn{margin-top:10px;width:100%;}
+
+/* Login page: one field, centred, nothing else to get in the way. */
+.login{max-width:340px;margin:60px auto;}
+
 /* Last, and !important, so it beats the display value of anything it is put
    on. This rule was missing entirely, which is why the trial card on the WiFi
    page was permanently visible however the script tried to hide it. */
@@ -111,13 +122,57 @@ body.manual .overlay .box{background:#f4f4f4;}
 )CSS";
 
 // ============================================================================
+// WEB SERVER - LOGIN PAGE
+// ============================================================================
+// One password, no username. A username on a single-operator appliance is a
+// second thing to forget for no security at all - the same reasoning a consumer
+// router applies when it asks only for a password.
+static const char LOGIN_HTML[] PROGMEM = R"HTML(<!DOCTYPE html><html><head>
+<meta name='viewport' content='width=device-width,initial-scale=1'>
+<title>Greenhouse Login</title><link rel='stylesheet' href='/style.css?v=700'>
+</head><body><div class='container'><div class='login'>
+<h1>Greenhouse</h1>
+<div class='card'>
+<label class='field'>Password</label>
+<input type='password' id='pass' autofocus onkeydown='if(event.key=="Enter")go()'>
+<button class='btn' style='width:100%;margin-top:12px;' onclick='go()'>Log in</button>
+<p class='note' id='msg'></p>
+</div>
+<p class='note' style='text-align:center;'>Readings stay visible without logging
+in, and a manually-energised heater can always be switched OFF. A login is
+needed to switch anything ON or to change a setting.</p>
+</div></div>
+<script>
+const $=id=>document.getElementById(id);
+async function go(){
+  const r=await fetch('/login',{method:'POST',
+    headers:{'Content-Type':'application/x-www-form-urlencoded'},
+    body:'pass='+encodeURIComponent($('pass').value)});
+  if(r.ok){location.href='/';return;}
+  const d=await r.json().catch(()=>({}));
+  $('msg').style.color='#FF6B6B';
+  $('msg').textContent=(r.status==429)
+    ?'Too many attempts - wait a minute and try again.'
+    :(d.error||'Wrong password.');
+  $('pass').value='';$('pass').focus();
+}
+</script></body></html>)HTML";
+
+// ============================================================================
 // WEB SERVER - ROOT PAGE
 // ============================================================================
 static const char INDEX_HTML[] PROGMEM = R"HTML(<!DOCTYPE html><html><head>
 <meta name='viewport' content='width=device-width,initial-scale=1'>
-<title>Greenhouse Control</title><link rel='stylesheet' href='/style.css?v=621'>
+<title>Greenhouse Control</title><link rel='stylesheet' href='/style.css?v=700'>
 </head><body><div class='container'>
 <h1>Greenhouse Controller</h1>
+
+<div class='banner hidden' id='pwNag'>
+<b>The web password is still the default.</b> Anyone who can reach this board
+can switch on the 2200 W element. Change it, or set the access point password
+so that fewer people can reach it.
+<button class='btn' onclick='location.href="/settings"'>Change password</button>
+</div>
 
 <div class='overlay hidden' id='netTrial'><div class='box'>
 <h2>New WiFi settings</h2>
@@ -171,13 +226,14 @@ shutdown still applies.</p>
 
 <div class='card'><div style='text-align:center;'>
 <button class='btn' onclick='location.href="/stats"'>Statistics</button>
-<button class='btn' onclick='location.href="/wifi"'>WiFi</button>
+<button class='btn' onclick='location.href="/settings"'>Settings</button>
 <button class='btn' onclick='location.href="/update"'>Firmware</button>
+<button class='btn' id='authBtn' onclick='authTap()'>Log in</button>
 </div></div>
 
 <div class='foot'>Greenhouse Controller v<span id='fw2'>-</span></div>
 </div>
-<script src='/ui.js?v=621'></script></body></html>)HTML";
+<script src='/ui.js?v=700'></script></body></html>)HTML";
 
 static const char UI_JS[] PROGMEM = R"JS(
 const $=id=>document.getElementById(id);
@@ -193,6 +249,21 @@ let S={};                 // last /status
 let settleUntil=0;        // stop the 2 s poll undoing something just tapped
 function touched(){settleUntil=Date.now()+1500;}
 function manual(){return S.manual==1;}
+
+// Every state-changing request goes through here, so an expired session has
+// exactly one handler instead of one per call site. Note that switching an
+// output OFF is deliberately allowed without a session, so this can send
+// everything the same way and let the board decide what needs a login.
+async function call(url,method){
+  const r=await fetch(url,{method:method||'POST'});
+  if(r.status==401){location.href='/login';return null;}
+  return r;
+}
+
+async function authTap(){
+  if(S.auth==1){await fetch('/logout',{method:'POST'});update();}
+  else location.href='/login';
+}
 
 function badge(el,on,label,tappable){
   el.textContent=label+': '+(on?'ON':'OFF');
@@ -246,6 +317,12 @@ async function update(){
     // reconnecting, so the decision is put in front of them here.
     $('netTrial').classList.toggle('hidden',!(S.trial>0));
     $('trialLeft').textContent=S.trial;
+
+    // The nag is shown only to someone logged in. Announcing "this board still
+    // has its default password" to every passer-by would be an invitation
+    // rather than a warning, and they could not act on it in any case.
+    $('pwNag').classList.toggle('hidden',!(S.auth==1&&S.pw_def==1));
+    $('authBtn').textContent=(S.auth==1)?'Log out':'Log in';
   }catch(e){console.error(e);}
 }
 
@@ -256,14 +333,14 @@ function sim(el,real,armed,value,man){
 }
 
 async function adj(p,a){
-  const r=await fetch('/adjust?param='+p+'&action='+a);
-  if(!r.ok&&r.status==409)alert('These are not used in manual mode.');
+  const r=await call('/adjust?param='+p+'&action='+a,'GET');
+  if(r&&!r.ok&&r.status==409)alert('These are not used in manual mode.');
   setTimeout(update,200);
 }
 
 async function setManual(on){
   touched();
-  await fetch('/manual?on='+(on?1:0),{method:'POST'});
+  await call('/manual?on='+(on?1:0));
   setTimeout(update,200);
 }
 
@@ -282,8 +359,8 @@ async function tapOut(dev){
     if(!confirm(msg))return;
   }
   touched();
-  const r=await fetch('/output?dev='+dev+'&on='+(on?1:0),{method:'POST'});
-  if(!r.ok)alert('Refused: not in manual mode.');
+  const r=await call('/output?dev='+dev+'&on='+(on?1:0));
+  if(r&&!r.ok)alert('Refused: not in manual mode.');
   setTimeout(update,200);
 }
 
@@ -296,20 +373,21 @@ async function tapSim(target){
   if(v===null)return;
   const on=v.trim()!=='';
   touched();
-  const r=await fetch('/sim?target='+target+'&on='+(on?1:0)+'&value='+(on?v.trim():0),
-    {method:'POST'});
-  if(!r.ok)alert('Value must be between -40 and 100 C.');
+  const r=await call('/sim?target='+target+'&on='+(on?1:0)+'&value='+(on?v.trim():0));
+  if(r&&!r.ok)alert('Value must be between -40 and 100 C.');
   setTimeout(update,200);
 }
 
 async function netKeep(){
-  const r=await fetch('/wifi/confirm',{method:'POST'});
+  const r=await call('/wifi/confirm');
+  if(!r)return;
   alert(r.ok?'Saved.':'Too late - the previous settings have already been restored.');
   update();
 }
 
 async function netRevert(){
-  const r=await fetch('/wifi/revert',{method:'POST'});
+  const r=await call('/wifi/revert');
+  if(!r)return;
   alert(r.ok?'Previous settings restored. You may need to reconnect.'
             :'Nothing to revert.');
   update();
@@ -345,9 +423,28 @@ static void handleUiJS() {
 // them nothing and saves a navigation while a 60-second clock runs.
 static const char WIFI_HTML[] PROGMEM = R"HTML(<!DOCTYPE html><html><head>
 <meta name='viewport' content='width=device-width,initial-scale=1'>
-<title>WiFi Settings</title><link rel='stylesheet' href='/style.css?v=621'>
+<title>Settings</title><link rel='stylesheet' href='/style.css?v=700'>
 </head><body><div class='container'>
-<h1>WiFi Settings</h1>
+<h1>Settings</h1>
+
+<div class='banner hidden' id='pwNag'>
+<b>The web password is still the default.</b> Anyone who can reach this board can
+switch on the 2200 W element.
+</div>
+
+<div class='card'><h2>Web Password</h2>
+<p class='note'>Guards this page, the controls and the firmware upload. It is
+not the access point password below, and it is not the one
+<code>pio run -e ota</code> uses &mdash; that one is compiled in, so changing
+this cannot lock you out of a board with no USB port.</p>
+<label class='field'>Current password</label>
+<input type='password' id='pw_cur' maxlength='63'>
+<label class='field'>New password &mdash; at least 8 characters</label>
+<input type='password' id='pw_new' maxlength='63'>
+<label class='field'>Repeat new password</label>
+<input type='password' id='pw_new2' maxlength='63'>
+<div class='actions'><button class='btn' onclick='savePw()'>Change password</button></div>
+</div>
 
 <div class='card'><h2>Current</h2>
 <div class='info-row'><span class='info-label'>Access point:</span><span class='info-value' id='c_ap'>-</span></div>
@@ -420,10 +517,30 @@ function canSet(id){return !dirty[id]&&$(id)!==document.activeElement;}
 function esc(s){return String(s).replace(/[&<>"']/g,c=>
   ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 
+// Changing the password ends every session including this one, which is the
+// point: it is how an operator responds to thinking someone else has it. The
+// redirect to the login page is the confirmation that it worked.
+async function savePw(){
+  const cur=$('pw_cur').value, np=$('pw_new').value;
+  if(np.length<8){alert('The new password must be at least 8 characters.');return;}
+  if(np!==$('pw_new2').value){alert('The two new passwords do not match.');return;}
+  const r=await fetch('/password',{method:'POST',
+    headers:{'Content-Type':'application/x-www-form-urlencoded'},
+    body:'cur='+encodeURIComponent(cur)+'&next='+encodeURIComponent(np)});
+  if(r.status==401){alert('That is not the current password.');return;}
+  if(!r.ok){const d=await r.json().catch(()=>({}));
+    alert(d.error||'Could not change the password.');return;}
+  alert('Password changed. Log in again with the new one.');
+  location.href='/login';
+}
+
 async function update(){
   try{
-    const d=await(await fetch('/wifi/status')).json();
+    const res=await fetch('/wifi/status');
+    if(res.status==401){location.href='/login';return;}
+    const d=await res.json();
     cur=d;
+    $('pwNag').classList.toggle('hidden',!(d.pw_def==1));
     $('c_ap').textContent=d.ap_ssid;
     $('c_ip').textContent=d.ap_ip+(d.mdns_en?('  /  '+d.host+'.local'):'');
     $('c_sta').textContent=d.sta_en?(d.sta_conn?(d.sta_ssid+' - '+d.sta_ip)
@@ -580,7 +697,14 @@ async function factory(){
 setInterval(update,2000); window.onload=update;
 </script></body></html>)HTML";
 
-static void handleWifiPage() {
+static void handleSettingsPage() {
+  // Redirect rather than 401 - this is a page request typed or tapped by a
+  // person, and a bare JSON error in the address bar is not an answer.
+  if (!authCheck(server)) {
+    server.sendHeader(F("Location"), F("/login"));
+    server.send(302, F("text/plain"), F("login required"));
+    return;
+  }
   server.send_P(200, PSTR("text/html"), WIFI_HTML);
 }
 
@@ -589,7 +713,7 @@ static void handleWifiPage() {
 // ============================================================================
 static const char STATS_HTML[] PROGMEM = R"HTML(<!DOCTYPE html><html><head>
 <meta name='viewport' content='width=device-width,initial-scale=1'>
-<title>Statistics</title><link rel='stylesheet' href='/style.css?v=621'>
+<title>Statistics</title><link rel='stylesheet' href='/style.css?v=700'>
 </head><body><div class='container'>
 <h1>System Statistics</h1>
 <div class='card'>
@@ -640,9 +764,22 @@ static void handleStats() {
 }
 
 // ============================================================================
+// LOGIN
+// ============================================================================
+static void handleLoginPage() {
+  server.send_P(200, PSTR("text/html"), LOGIN_HTML);
+}
+
+// ============================================================================
 // STATUS JSON - the single source of truth for every dynamic value in the UI
 // ============================================================================
 static void handleStatusJSON() {
+  // Readable without a session, by design: this device is a heater switch
+  // first, and glancing at the greenhouse temperature should not need a
+  // password. The Host allowlist still applies - that is what needSession=false
+  // leaves in place - so a rebound DNS name cannot read it either.
+  if (!requireAuth(server, false)) return;
+
   // Sized for the full payload with every sensor present and every optional
   // field populated. A silently truncated /status would take the whole UI down
   // with it, so there is deliberate headroom here.
@@ -650,6 +787,11 @@ static void handleStatusJSON() {
 
   doc["fw"] = FIRMWARE_VERSION;
   doc["up"] = millis() / 1000;
+
+  // Drives the login/logout button and the default-password nag. Both are
+  // presentation only; nothing here is a permission check.
+  doc["auth"] = authCheck(server) ? 1 : 0;
+  doc["pw_def"] = authPasswordIsDefault() ? 1 : 0;
 
   doc["avg"] = sensorData.averageTemp;
   doc["heat_temp"] = sensorData.heaterTemp;
@@ -685,7 +827,6 @@ static void handleStatusJSON() {
   doc["sim_air_v"] = sim.air;
   doc["sim_heat"] = sim.heaterActive ? 1 : 0;
   doc["sim_heat_v"] = sim.heater;
-  doc["sim_left"] = simSecondsLeft();
 
   doc["temp_min"] = settings.tempMin;
   doc["temp_max"] = settings.tempMax;
@@ -741,6 +882,8 @@ static const Setpoint SETPOINTS[] = {
 };
 
 static void handleAdjust() {
+  if (!requireAuth(server)) return;
+
   // None of these govern anything in manual mode, which is why the two cards
   // carrying them are dimmed out. Refused here as well so a stale tab on
   // another phone cannot quietly move a setpoint the page says is inactive.
@@ -772,6 +915,7 @@ static void handleAdjust() {
 }
 
 static void handleResetStats() {
+  if (!requireAuth(server)) return;
   resetStats();
   server.send(200, F("application/json"), F("{\"ok\":1}"));
 }
@@ -786,6 +930,11 @@ static void handleResetStats() {
 static bool argIsOn(const String& name) { return server.arg(name) == "1"; }
 
 static void handleManual() {
+  // Deliberately NOT exempt when switching manual off: leaving manual mode
+  // hands the element back to the controller, which may well decide to heat.
+  // Only an explicit output-OFF is the unconditionally safe direction.
+  if (!requireAuth(server)) return;
+
   if (!server.hasArg(F("on"))) {
     server.send(400, F("application/json"), F("{\"error\":\"missing on\"}"));
     return;
@@ -795,19 +944,30 @@ static void handleManual() {
 }
 
 static void handleOutput() {
-  // A stale tab on someone else's phone must not be able to drive a relay
-  // after the controller has been put back into automatic.
-  if (!settings.manualMode) {
-    server.send(409, F("application/json"), F("{\"error\":\"not in manual mode\"}"));
-    return;
-  }
+  // The arguments are read before the gate, because WHICH DIRECTION is being
+  // requested decides whether a session is needed at all.
   if (!server.hasArg(F("dev")) || !server.hasArg(F("on"))) {
+    if (!requireAuth(server, false)) return;
     server.send(400, F("application/json"), F("{\"error\":\"missing dev/on\"}"));
     return;
   }
 
   const String dev = server.arg(F("dev"));
   const bool on = argIsOn(F("on"));
+
+  // SWITCHING SOMETHING OFF NEVER REQUIRES A SESSION, and that asymmetry is the
+  // point. Every failure mode of the code above this line - an expired cookie,
+  // a forgotten password, a bug in auth.cpp - must still leave a way to shed
+  // 2200 W. The Host allowlist still applies in both directions.
+  if (!requireAuth(server, /*needSession=*/on)) return;
+
+  // A stale tab on someone else's phone must not be able to drive a relay
+  // after the controller has been put back into automatic.
+  if (!settings.manualMode) {
+    server.send(409, F("application/json"), F("{\"error\":\"not in manual mode\"}"));
+    return;
+  }
+
   const unsigned long now = millis();
 
   if (dev == F("heater"))   setManualHeater(on, now);
@@ -822,6 +982,7 @@ static void handleOutput() {
 }
 
 static void handleSim() {
+  if (!requireAuth(server)) return;
   if (!server.hasArg(F("target")) || !server.hasArg(F("on"))) {
     server.send(400, F("application/json"), F("{\"error\":\"missing target/on\"}"));
     return;
@@ -852,9 +1013,14 @@ static void handleSim() {
 // WIFI CONFIGURATION
 // ============================================================================
 static void handleWifiStatus() {
+  // Gated: this lists the SSIDs the board knows and the MAC of everything
+  // associated with it. None of that belongs to a passer-by.
+  if (!requireAuth(server)) return;
+
   StaticJsonDocument<1024> doc;
   const WifiConfig& cfg = netLiveConfig();
 
+  doc["pw_def"]    = authPasswordIsDefault() ? 1 : 0;
   doc["ap_ssid"]   = cfg.apSsid;
   doc["ap_ip"]     = netApAddress();      // what the radio actually has
   doc["ap_ip_cfg"] = cfg.apIp;            // what is configured, for the form
@@ -894,6 +1060,8 @@ static void copyArg(char* dst, size_t cap, const String& value) {
 // Access point side: name, password, address and the mDNS switch. Goes on
 // trial, because every one of these can cost the operator their way in.
 static void handleWifiAp() {
+  if (!requireAuth(server)) return;
+
   // Start from what is running now, so an omitted field means "leave it alone".
   // Passwords are never sent to the browser, so a blank password box has to
   // mean unchanged rather than empty - otherwise merely opening this page and
@@ -921,6 +1089,8 @@ static void handleWifiAp() {
 // point is untouched - a wrong password here costs an address the operator did
 // not have a moment ago, not their way into the board.
 static void handleWifiSta() {
+  if (!requireAuth(server)) return;
+
   WifiConfig cfg = netLiveConfig();
 
   const String ssid = server.hasArg(F("sta_ssid")) ? server.arg(F("sta_ssid"))
@@ -950,6 +1120,8 @@ static void handleWifiSta() {
 // Asynchronous by construction - see netStartScan(). ?start=1 kicks one off;
 // a bare GET only reports, so the page can poll without restarting the scan.
 static void handleWifiScan() {
+  if (!requireAuth(server)) return;
+
   if (server.hasArg(F("start"))) netStartScan();
 
   const int state = netScanState();
@@ -976,6 +1148,7 @@ static void handleWifiScan() {
 }
 
 static void handleWifiConfirm() {
+  if (!requireAuth(server)) return;
   if (!netConfirm()) {
     server.send(409, F("application/json"), F("{\"error\":\"no trial running\"}"));
     return;
@@ -984,6 +1157,7 @@ static void handleWifiConfirm() {
 }
 
 static void handleWifiRevert() {
+  if (!requireAuth(server)) return;
   if (!netRevert()) {
     server.send(409, F("application/json"), F("{\"error\":\"no trial running\"}"));
     return;
@@ -992,6 +1166,7 @@ static void handleWifiRevert() {
 }
 
 static void handleWifiReset() {
+  if (!requireAuth(server)) return;
   if (!netFactoryReset()) {
     server.send(500, F("application/json"), F("{\"error\":\"reset failed\"}"));
     return;
@@ -1002,19 +1177,36 @@ static void handleWifiReset() {
 
 // ============================================================================
 void webBegin() {
+  // Before any route is registered: authBegin() seeds the password on first
+  // boot and makes the one collectHeaders() call the whole firmware gets.
+  authBegin(server);
+
+  // Static shells and the readings are public. Everything that CHANGES
+  // something is gated inside its handler, with one deliberate exception:
+  // POST /output with on=0 needs no session, because shedding 2200 W must
+  // never depend on this file working correctly.
   server.on("/", handleRoot);
   server.on("/style.css", handleStyleCSS);
   server.on("/ui.js", handleUiJS);
   server.on("/status", handleStatusJSON);
-  server.on("/adjust", handleAdjust);
   server.on("/stats", handleStats);
+
+  server.on("/login", HTTP_GET, handleLoginPage);
+  server.on("/login", HTTP_POST, []() { authLogin(server); });
+  server.on("/logout", HTTP_POST, []() { authLogout(server); });
+  server.on("/password", HTTP_POST, []() {
+    if (!requireAuth(server)) return;
+    authChangePassword(server);
+  });
+
+  server.on("/adjust", handleAdjust);
   server.on("/resetstats", handleResetStats);
 
   server.on("/manual", HTTP_POST, handleManual);
   server.on("/output", HTTP_POST, handleOutput);
   server.on("/sim", HTTP_POST, handleSim);
 
-  server.on("/wifi", HTTP_GET, handleWifiPage);
+  server.on("/settings", HTTP_GET, handleSettingsPage);
   server.on("/wifi/status", HTTP_GET, handleWifiStatus);
   server.on("/wifi/scan", HTTP_GET, handleWifiScan);
   server.on("/wifi/ap", HTTP_POST, handleWifiAp);

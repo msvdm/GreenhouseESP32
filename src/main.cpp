@@ -18,6 +18,7 @@
 #include <Arduino.h>
 #include <esp_task_wdt.h>
 
+#include "button.h"
 #include "config.h"
 #include "control.h"
 #include "display.h"
@@ -41,6 +42,7 @@ void setup() {
 
   // Relays to their safe state before anything else can run.
   controlBegin();
+  buttonBegin();
 
   esp_task_wdt_init(WATCHDOG_TIMEOUT_S, true);
   esp_task_wdt_add(NULL);
@@ -86,6 +88,12 @@ void loop() {
   // candidate never left RAM. Non-blocking, so a pending revert can never
   // delay a heater-zone read.
   netLoop(now);
+
+  // The IO0 factory-reset hold. Non-blocking, and it never touches a relay -
+  // it restores credentials and settings, nothing else. Below the OTA gate for
+  // the same reason netLoop() is: resetting the network mid-upload would drop
+  // the connection carrying it.
+  buttonLoop(now);
 
   // Heater zone: read fast, and act on the critical trips at the same rate.
   if (now - lastHeaterRead >= HEATER_TEMP_READ_INTERVAL) {

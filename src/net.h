@@ -41,6 +41,13 @@ bool netApplySta(const WifiConfig& candidate);
 // Queue the factory configuration, on trial - it resets the AP too.
 bool netFactoryReset();
 
+// The IO0 button's reset: applies the factory configuration and COMMITS it at
+// once, with no trial. The trial exists to protect someone reconfiguring the
+// board from across the garden; whoever is holding the button is standing in
+// front of it, and making them then reconnect and confirm within 60 seconds
+// would only be a way to fail a recovery that has already succeeded.
+void netFactoryResetNow();
+
 // Keep the configuration currently on the radio. Returns false if no trial is
 // running (a confirmation that arrives after the revert, for instance).
 bool netConfirm();
@@ -48,7 +55,6 @@ bool netConfirm();
 // Put the committed configuration back now rather than waiting out the window.
 bool netRevert();
 
-bool netTrialActive();
 unsigned long netTrialSecondsLeft();
 
 // What the radio is running right now - the candidate during a trial.

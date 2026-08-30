@@ -28,11 +28,22 @@ extern const char* FIRMWARE_VERSION;
 
 // TFT display. CS and RST sit on 21/22 because GPIO 5 and 17 are now the
 // heater sensor bus and the heater relay respectively.
+//
+// SCLK 18 and MOSI 23 are not named here because the Adafruit hardware-SPI
+// constructor takes neither - it uses the VSPI defaults, which are those two
+// pins. Note that GPIO 23 also drives the carrier board's status LED, so that
+// LED flickers with SPI traffic and is useless as an indicator.
 #define TFT_CS   21
 #define TFT_RST  22
 #define TFT_DC    2
-#define TFT_SCLK 18
-#define TFT_MOSI 23
+
+// The carrier board's IO0 button, active-LOW. GPIO 0 is a strapping pin: held
+// LOW through a reset it enters the serial bootloader, so this can only ever be
+// a RUNTIME hold - by the time it is read here the bootloader has long since
+// handed over and the pin is an ordinary input. Readings are unreliable while a
+// USB-TTL module is attached, because its auto-reset circuit drives this pin.
+#define BOOT_BUTTON_PIN 0
+#define FACTORY_RESET_HOLD 5000UL          // 5 s hold, with a TFT countdown
 
 #define MAX_SENSORS_PER_SIDE 3
 
@@ -154,22 +165,6 @@ void saveWifiConfig(const WifiConfig& cfg);
 // factory value rather than being silently truncated into something that
 // almost works. Returns false if it had to change anything.
 bool validateWifiConfig(WifiConfig& cfg);
-
-// ============================================================================
-// FIRMWARE UPDATE PASSWORD
-// ============================================================================
-// Guards the browser upload at POST /update, which had no authentication at
-// all: anyone who could reach the board could replace the firmware driving a
-// 2200 W contactor. Empty by default, because a board that demands a password
-// nobody has set yet is a board you cannot update.
-//
-// Separate from OTA_PASSWORD in secrets.h. That one is compiled in and guards
-// the espota path; this one is operator-set at runtime and guards the browser
-// path. Changing this cannot lock you out of espota, and vice versa.
-#define UPDATE_PASS_LEN 64   // 63 characters + NUL
-
-void loadUpdatePassword(char* dst, size_t cap);
-void saveUpdatePassword(const char* pass);
 
 // ============================================================================
 // STATISTICS

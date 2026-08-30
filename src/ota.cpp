@@ -3,6 +3,7 @@
 #include <ArduinoOTA.h>
 #include <Update.h>
 #include <esp_task_wdt.h>
+#include "auth.h"
 #include "config.h"
 #include "control.h"
 #include "display.h"
@@ -10,24 +11,25 @@
 
 static bool updating = false;
 
-// Operator-set password for the BROWSER upload path. Empty means unguarded,
-// which is the default and also what every existing board will come up with.
-static char updatePass[UPDATE_PASS_LEN] = { 0 };
-
 // Set when an upload is refused, so the write path stays shut for the rest of
 // the request and the result handler can answer 401 instead of 500.
 static bool uploadRejected = false;
 
-bool otaInProgress() { return updating; }
+// Whether a multipart file part arrived at all.
+//
+// Without it, a POST that reaches the result handler carrying no image is
+// indistinguishable from one that wrote an image perfectly: the upload callback
+// never fired, so nothing set uploadRejected and nothing set an error, and
+// Update.hasError() is false when no update was ever attempted. The handler
+// would then answer "Update OK" and reboot the board - unauthenticated, because
+// the session check lives in the upload callback that never ran.
+//
+// This is defensive rather than a fix for an observed exploit: in practice a
+// malformed POST to this route is usually swallowed earlier, by the library
+// problem recorded under Known-unresolved in CLAUDE.md. Both need to hold.
+static bool uploadStarted = false;
 
-// Checked on UPLOAD_FILE_START, the last moment before Update.begin() opens the
-// flash partition. Headers are fully parsed by then, whereas a form field in
-// the body would not arrive until after the image had already been written.
-// That ordering is the entire reason this is carried in a header.
-static bool updateAuthorised(WebServer& server) {
-  if (updatePass[0] == 0) return true;                 // no password set
-  return server.header(F("X-Update-Auth")) == updatePass;
-}
+bool otaInProgress() { return updating; }
 
 // ----------------------------------------------------------------------------
 // Shared safety preamble. Called before any firmware write begins.
@@ -63,9 +65,12 @@ static void otaFinish(bool ok, const char* message) {
 // ----------------------------------------------------------------------------
 // Browser upload: GET /update serves the form, POST /update takes the image.
 // ----------------------------------------------------------------------------
+// No password field: the browser upload is guarded by the web UI session, the
+// same one that guards the control endpoints. Reaching this page at all means
+// already being logged in.
 static const char UPDATE_HTML[] PROGMEM = R"HTML(<!DOCTYPE html><html><head>
 <meta name='viewport' content='width=device-width,initial-scale=1'>
-<title>Firmware Update</title><link rel='stylesheet' href='/style.css?v=621'>
+<title>Firmware Update</title><link rel='stylesheet' href='/style.css?v=700'>
 </head><body><div class='container'>
 <h1>Firmware Update</h1>
 <div class='card'>
@@ -76,53 +81,30 @@ fails or is interrupted, the current firmware keeps running.</p>
 <input type='file' id='file' accept='.bin' required
        style='width:100%;margin:10px 0;color:inherit;'>
 
-<label class='field'>Update password</label>
-<input type='password' id='pass' maxlength='63' placeholder='none set'>
-<p class='note' id='passNote'></p>
-
 <button class='btn' style='width:100%;margin-top:10px;' onclick='upload()'>
 Upload firmware.bin</button>
 <div id='msg' style='margin-top:15px;color:#aaa;'></div>
-</div>
-
-<div class='card'><h2>Change update password</h2>
-<label class='field'>New password &mdash; blank clears it</label>
-<input type='password' id='newpass' maxlength='63' placeholder='no password'>
-<p class='note'>If a password is already set, enter it above first. Minimum 8
-characters. This is separate from the compiled-in password used by
-<code>pio run -e ota</code>; changing it here cannot lock you out of that.</p>
-<div class='actions'><button class='btn' onclick='savePass()'>Save password</button></div>
 </div>
 
 <button class='btn' style='width:100%;' onclick='location.href="/"'>Back to Control</button>
 </div>
 <script>
 const $=id=>document.getElementById(id);
-let isSet=false;
-
-async function refresh(){
-  try{
-    const d=await(await fetch('/update/status')).json();
-    isSet=d.set==1;
-    $('pass').placeholder=isSet?'required':'none set';
-    $('passNote').textContent=isSet
-      ?'Required to upload, and to change the password.'
-      :'No password is set. Anyone who can reach this board can replace the '+
-       'firmware that drives the 2200 W contactor - setting one is a good idea.';
-    $('passNote').style.color=isSet?'#888':'#FF6B6B';
-  }catch(e){console.error(e);}
-}
 
 async function upload(){
   const f=$('file').files[0];
   if(!f){alert('Choose a firmware.bin first.');return;}
-  if(isSet&&!$('pass').value){alert('This board needs the update password.');return;}
   $('msg').textContent='Uploading... the board reboots automatically when it finishes.';
   const fd=new FormData();
   fd.append('firmware',f,f.name);
   try{
-    const r=await fetch('/update',{method:'POST',
-      headers:{'X-Update-Auth':$('pass').value},body:fd});
+    const r=await fetch('/update',{method:'POST',body:fd});
+    if(r.status==401){
+      $('msg').style.color='#FF6B6B';
+      $('msg').textContent='Session expired - log in again.';
+      setTimeout(()=>location.href='/login',1500);
+      return;
+    }
     $('msg').textContent=await r.text();
     if(!r.ok)$('msg').style.color='#FF6B6B';
   }catch(e){
@@ -131,26 +113,10 @@ async function upload(){
     $('msg').textContent='Connection closed - if the board reboots, it worked.';
   }
 }
-
-async function savePass(){
-  const np=$('newpass').value;
-  if(np.length>0&&np.length<8){
-    alert('Use at least 8 characters, or leave it blank to clear.');return;}
-  if(!np&&!confirm('Clear the update password? Anyone who can reach this board '+
-    'will then be able to replace its firmware.'))return;
-  const r=await fetch('/update/pass?new='+encodeURIComponent(np),
-    {method:'POST',headers:{'X-Update-Auth':$('pass').value}});
-  if(r.status==401){alert('Wrong current password.');return;}
-  if(!r.ok){alert('Could not save the password.');return;}
-  $('newpass').value='';$('pass').value=np;
-  alert(np?'Password saved.':'Password cleared.');
-  refresh();
-}
-
-window.onload=refresh;
 </script></body></html>)HTML";
 
 static void handleUpdatePage(WebServer& server) {
+  if (!requireAuth(server)) return;
   server.send_P(200, PSTR("text/html"), UPDATE_HTML);
 }
 
@@ -162,9 +128,20 @@ static void handleUpdateUpload(WebServer& server) {
       // Checked before otaPrepare(), so a refused upload does not shed the
       // heater, release the watchdog or open the flash partition. An
       // unauthenticated request must cost the running system nothing.
-      uploadRejected = !updateAuthorised(server);
+      //
+      // The session cookie is a HEADER, so it is fully parsed by the time this
+      // runs - which is the whole reason the credential travels in one. A form
+      // field would not arrive until after the image had already been written.
+      // authCheck() rather than requireAuth() because nothing can be sent from
+      // here; handleUpdateResult() answers once the body has been consumed.
+      // Set before the auth check: a REFUSED upload is still an upload, and the
+      // result handler needs to tell it apart from a request that carried no
+      // image at all.
+      uploadStarted = true;
+
+      uploadRejected = !authCheck(server);
       if (uploadRejected) {
-        Serial.println(F("[OTA] Web upload REFUSED - wrong or missing password"));
+        Serial.println(F("[OTA] Web upload REFUSED - no valid session"));
         break;
       }
       otaPrepare("web upload");
@@ -205,10 +182,24 @@ static void handleUpdateUpload(WebServer& server) {
 }
 
 static void handleUpdateResult(WebServer& server) {
-  if (uploadRejected) {
-    uploadRejected = false;
+  const bool started = uploadStarted;
+  const bool rejected = uploadRejected;
+  uploadStarted = false;
+  uploadRejected = false;
+
+  // No file part ever arrived, so this was not a firmware upload. It must not
+  // reach the ESP.restart() below: Update.hasError() is false when nothing was
+  // ever attempted, so "no image" would otherwise be indistinguishable from
+  // "wrote it perfectly" and reboot the board on request, unauthenticated.
+  if (!started) {
+    if (!requireAuth(server)) return;
+    server.send(400, F("text/plain"), F("No firmware image in the request"));
+    return;
+  }
+
+  if (rejected) {
     server.sendHeader(F("Connection"), F("close"));
-    server.send(401, F("text/plain"), F("Wrong update password - nothing was written"));
+    server.send(401, F("text/plain"), F("Not logged in - nothing was written"));
     return;
   }
 
@@ -220,34 +211,6 @@ static void handleUpdateResult(WebServer& server) {
     delay(500);
     ESP.restart();
   }
-}
-
-static void handleUpdateStatus(WebServer& server) {
-  // Only whether a password exists, never the password itself.
-  server.send(200, F("application/json"),
-              updatePass[0] ? F("{\"set\":1}") : F("{\"set\":0}"));
-}
-
-static void handleUpdatePassword(WebServer& server) {
-  // Changing the password requires the current one, so someone who wanders
-  // onto an already-protected board cannot simply set their own.
-  if (!updateAuthorised(server)) {
-    server.send(401, F("application/json"), F("{\"error\":\"wrong password\"}"));
-    return;
-  }
-
-  const String next = server.arg(F("new"));
-
-  // Either unguarded or long enough to be worth something. Eight characters
-  // matches the floor the WiFi passwords already use on the settings page.
-  if (next.length() > 0 && (next.length() < 8 || next.length() >= UPDATE_PASS_LEN)) {
-    server.send(400, F("application/json"), F("{\"error\":\"8-63 characters, or blank\"}"));
-    return;
-  }
-
-  strlcpy(updatePass, next.c_str(), UPDATE_PASS_LEN);
-  saveUpdatePassword(updatePass);
-  server.send(200, F("application/json"), F("{\"ok\":1}"));
 }
 
 // ----------------------------------------------------------------------------
@@ -285,21 +248,15 @@ void otaBegin(WebServer& server) {
 
   ArduinoOTA.begin();
 
-  loadUpdatePassword(updatePass, UPDATE_PASS_LEN);
-
-  // WebServer discards every header it was not told to keep, and the upload
-  // handler needs this one before the body arrives.
-  static const char* UPDATE_HEADERS[] = { "X-Update-Auth" };
-  server.collectHeaders(UPDATE_HEADERS, 1);
-
+  // The Cookie header the upload path needs is collected by authBegin(), which
+  // webBegin() calls first. collectHeaders() REPLACES the list rather than
+  // adding to it, so there must be exactly one such call in the firmware and
+  // this is deliberately not it.
   server.on("/update", HTTP_GET,  [&server]() { handleUpdatePage(server); });
   server.on("/update", HTTP_POST, [&server]() { handleUpdateResult(server); },
                                   [&server]() { handleUpdateUpload(server); });
-  server.on("/update/status", HTTP_GET,  [&server]() { handleUpdateStatus(server); });
-  server.on("/update/pass",   HTTP_POST, [&server]() { handleUpdatePassword(server); });
 
-  Serial.printf("OTA ready (ArduinoOTA + POST /update, web password %s)\n",
-                updatePass[0] ? "SET" : "not set");
+  Serial.println(F("OTA ready (ArduinoOTA + POST /update, session-guarded)"));
 }
 
 void otaLoop() {

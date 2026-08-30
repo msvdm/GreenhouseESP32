@@ -238,7 +238,19 @@ bool netRevert() {
   return true;
 }
 
-bool netTrialActive() { return trialRunning || applyPending; }
+void netFactoryResetNow() {
+  // Any trial in flight is abandoned rather than left to fire later against a
+  // configuration it was never started for.
+  trialRunning = false;
+  applyPending = false;
+
+  committed = factoryWifiConfig();
+  validateWifiConfig(committed);
+  saveWifiConfig(committed);
+  applyAll(committed);
+
+  Serial.println(F("[WiFi] Factory settings applied and committed"));
+}
 
 unsigned long netTrialSecondsLeft() {
   if (applyPending)  return WIFI_TRIAL_WINDOW / 1000;

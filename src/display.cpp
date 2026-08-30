@@ -186,3 +186,42 @@ void displayOtaResult(bool ok, const char* message) {
   tft.print(message);
   chromeDrawn = false;
 }
+
+// ----------------------------------------------------------------------------
+// FACTORY RESET
+// ----------------------------------------------------------------------------
+void displayHoldReset(int secondsLeft) {
+  tft.fillScreen(ST77XX_BLACK);
+  tft.setTextSize(1);
+  tft.setTextColor(ST77XX_YELLOW);
+  tft.setCursor(5, 20);
+  tft.print(F("FACTORY RESET"));
+
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setCursor(5, 40);
+  tft.print(F("Release to cancel"));
+
+  tft.setTextSize(3);
+  tft.setTextColor(ST77XX_RED);
+  tft.setCursor(70, 65);
+  tft.print(secondsLeft);
+  tft.setTextSize(1);
+
+  chromeDrawn = false;
+}
+
+void displayResetDone(const char* apSsid, const char* uiPass) {
+  tft.fillScreen(ST77XX_BLACK);
+  tft.setTextSize(1);
+  tft.setTextColor(ST77XX_GREEN);
+  tft.setCursor(5, 30);
+  tft.print(F("RESET TO DEFAULTS"));
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setCursor(5, 50);
+  tft.printf("AP:  %s", apSsid);
+  tft.setCursor(5, 62);
+  tft.printf("Web: %s", uiPass);
+  chromeDrawn = false;
+}
+
+void displayInvalidate() { chromeDrawn = false; }

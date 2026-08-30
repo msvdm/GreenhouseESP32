@@ -25,7 +25,15 @@ DC 7–60 V supply, no onboard USB). Relay inputs are **active-HIGH**.
 | Right air sensors | 15 | OneWire, strapping pin — pull-up keeps it HIGH at boot |
 | Heater zone sensor | 5 | OneWire, strapping pin — pull-up keeps it HIGH at boot |
 | TFT CS / RST / DC | 21 / 22 / 2 | CS and RST were moved off 5/17 when the relays landed there |
-| TFT SCLK / MOSI | 18 / 23 | |
+| TFT SCLK / MOSI | 18 / 23 | VSPI defaults, not named in code — the constructor takes neither |
+| IO0 button | 0 | active-LOW, factory reset on a 5 s **runtime** hold |
+| Onboard status LED | 23 | **unusable** — shares TFT MOSI, so it flickers with SPI traffic |
+
+**GPIO 0 is a strapping pin.** Held LOW through a reset it selects the serial
+bootloader, so a hold-at-boot reset would never reach this firmware — the
+factory reset is therefore a *runtime* hold, read in `loop()` once the
+bootloader has handed over. Readings are unreliable while a USB-TTL module is
+attached, because its auto-reset circuit drives this pin.
 
 **The board has no USB port.** The only serial access is a separate USB-TTL
 module on RX/TX/GND. Assume OTA is the normal update path.
@@ -45,6 +53,8 @@ src/sensors.*    DS18B20 acquisition and validation. Knows nothing about relays
 src/control.*    actuators, fault policy, mode machine — the ONLY relay writer
 src/display.*    ST7735 status screen
 src/net.*        AP + optional station, and the WiFi trial/commit machinery
+src/auth.*       web UI password, sessions, Host allowlist — the ONLY gate
+src/button.*     IO0 runtime hold → factory reset. Never touches a relay
 src/webui.*      static PROGMEM pages + /status JSON
 src/ota.*        ArduinoOTA + browser upload, with the safety preamble
 src/secrets.h    gitignored. FACTORY values only; live WiFi config is in NVS
@@ -91,14 +101,70 @@ polls anyway. Do not render values into HTML server-side — the old code did, a
 JavaScript overwrote every one of them two seconds later. Serve with `send_P`,
 never build pages with `String`.
 
-**The browser update path is password-guarded at runtime.** `POST /update`
-checks the `X-Update-Auth` header on `UPLOAD_FILE_START`, before `otaPrepare()`
-and `Update.begin()` - a refused upload must not shed the heater, release the
-watchdog or open the flash partition. It is a header rather than a form field
-precisely because headers are parsed before the body: a field would arrive after
-the image had already been written. The password lives in NVS (`upd_pass`), is
-empty by default, and is unrelated to `OTA_PASSWORD` in `secrets.h`, which is
-compiled in and guards espota.
+**Three credentials, three distinct jobs. Never merge them.**
+
+| Secret | Default | Stored | Guards |
+|---|---|---|---|
+| AP WPA2 | SSID `Green` / `ChangeME` | NVS, seeded from `secrets.h` | joining the radio |
+| Web UI password | `GreenAdmin` | NVS, **salted SHA-256** | the whole browser surface |
+| `OTA_PASSWORD` | its own value | compiled into `secrets.h` | `espota` — break-glass |
+
+The WiFi password is a link-layer secret shared with every device that joins;
+the web password must not be, and the two must never be the same string. There
+used to be a fourth (`upd_pass`, an NVS password just for the browser upload,
+empty by default) — it is gone, and the upload is guarded by the web session
+like everything else.
+
+`OTA_PASSWORD` stays compiled in **on purpose**: losing the web UI must never
+lock you out of a board with no USB port. Do not make it web-editable.
+
+**`requireAuth()` in `auth.cpp` is the only gate, and it is called at the top of
+the handler.** It does two things: a **Host allowlist** (only the AP IP, the STA
+IP and `<hostname>.local` — this is what stops DNS rebinding) and a session
+lookup. Do not scatter equivalent checks; add the call.
+
+**Switching an output OFF never requires a session.** `handleOutput()` reads
+`on` *before* the gate and passes `needSession=on`. Every failure mode of the
+auth code — expired cookie, forgotten password, a bug in `auth.cpp` — must still
+leave a way to shed 2200 W. Note `argIsOn()` treats anything that is not `"1"`
+as off, so a malformed unauthenticated request can only ever move an output in
+the safe direction.
+
+Two things this exemption is deliberately *not*: it does not extend to leaving
+manual mode (`/manual`), because handing the element back to the controller may
+well start heating; and it does nothing in automatic mode, where the 409 stands
+because the controller owns the relay and would re-assert it on the next pass
+anyway. Manual is the mode where the interlocks are stripped, which is precisely
+why the unauthenticated off-switch belongs there.
+
+**The upload path calls `authCheck()`, not `requireAuth()`, on
+`UPLOAD_FILE_START`** — before `otaPrepare()` and `Update.begin()`, so a refused
+upload does not shed the heater, release the watchdog or open the flash
+partition. `authCheck()` because nothing can be sent from inside a body
+callback; `handleUpdateResult()` sends the 401 afterwards. The credential is a
+**header** (the session cookie) precisely because headers are parsed before the
+body: a form field would not arrive until after the image had been written.
+
+**`collectHeaders()` must be called exactly once.** It REPLACES the list rather
+than appending, so a second call silently drops `Cookie` and logs everyone out.
+`authBegin()` owns it; `ota.cpp` deliberately does not call it.
+
+**CSRF is handled by `SameSite=Strict` on the session cookie**, not by tokens.
+Before that existed, every state-changing endpoint was reachable from any page
+open in a browser on the same network: `fetch(url, {method:'POST'})` with no
+custom header and no body is a CORS *simple request*, so nothing preflights it.
+If you add an endpoint that changes something, it needs the gate for that reason
+alone.
+
+**The IO0 button restores credentials and settings. It never touches a relay.**
+A factory reset is a credential operation, not an emergency stop — conflating
+the two would put a second relay writer in the firmware. `button.cpp` resets the
+web password, the AP configuration and the setpoints, and deliberately preserves
+the statistics: they are a maintenance record, nothing about them can lock
+anybody out, and `/stats` has its own reset. The AP change is committed
+immediately rather than going on trial, because the trial exists to protect
+someone configuring the board remotely and whoever is holding the button is
+standing in front of it.
 
 **Bump the `?v=` on `/style.css` and `/ui.js` whenever either changes.** They
 once carried a 24-hour `max-age`, and after an OTA browsers kept serving the old
@@ -231,3 +297,34 @@ not hangs.
 
 Not yet done, worth suggesting: log `esp_reset_reason()` at boot and surface it
 on `/status`, and add a watchdog that does not depend on the CPU being sane.
+
+### A malformed POST to `/update` stalls `loop()` and trips the watchdog
+
+**Reproduced on hardware, v7.0.1, 2026-08-30.** A single unauthenticated
+`curl -X POST http://<board>/update` with no multipart body makes the board stop
+serving for ~18 s — every concurrent `/status` times out — and then reboot.
+Confirmed by watching the uptime reset and `shutdowns` increment.
+
+The stall is in the Arduino `WebServer` library, before any handler of ours
+runs, so no gate in `auth.cpp` can prevent it:
+
+- `Parsing.cpp:101` — `if (!isForm && _currentHandler && _currentHandler->canRaw(...))`.
+  `canRaw()` is true for any route registered with an upload handler, which is
+  exactly and only `/update`. Other POST routes answer 401 instantly.
+- That path then waits for a request body that never arrives.
+- `HTTP_MAX_POST_WAIT` (`WebServer.h:50`) is **not** `#ifndef`-guarded, so it
+  cannot be raised or lowered with a `build_flag`.
+
+Why it matters here rather than being a curiosity: the stall parks `loop()`, so
+the 1 Hz heater-zone read and `safetyTick()` stop with it. The failure mode is
+safe-ish — the watchdog reboot lands in `controlBegin()` with the relays off —
+but an element can run unsupervised for the length of the stall, and any
+unauthenticated device on the network can trigger it repeatedly.
+
+`uploadStarted` in `ota.cpp` is a *different*, adjacent fix and does not address
+this. Do not confuse the two.
+
+Options, none taken yet: drop the upload handler and read the image from the raw
+body; move the browser upload to a second `WebServer` on another port so a stall
+cannot touch the control path; or vendor a patched `Parsing.cpp`. All three are
+real work and the platform pin makes the last one unattractive.

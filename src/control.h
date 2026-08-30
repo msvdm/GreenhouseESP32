@@ -129,6 +129,3 @@ extern SimOverride sim;
 bool setSimAir(bool on, float value);
 bool setSimHeater(bool on, float value);
 void clearSim();
-
-// Seconds before the armed overrides expire; 0 when nothing is armed.
-unsigned long simSecondsLeft();

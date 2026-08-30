@@ -235,13 +235,6 @@ bool setSimHeater(bool on, float value) {
 
 void clearSim() { sim = SimOverride(); }
 
-unsigned long simSecondsLeft() {
-  if (!sim.airActive && !sim.heaterActive) return 0;
-  const unsigned long elapsed = millis() - sim.armedAt;
-  if (elapsed >= SIM_TIMEOUT) return 0;
-  return (SIM_TIMEOUT - elapsed) / 1000;
-}
-
 // Simulation is a test aid, and a test aid that outlives the test is a hazard.
 // Manual mode is allowed to be sticky because the operator can hear the relays
 // and see the light-grey page; an override quietly replacing the greenhouse

@@ -22,7 +22,7 @@
 #define MDNS_HOSTNAME "greenhouse"
 #endif
 
-const char* FIRMWARE_VERSION = "6.2.1";
+const char* FIRMWARE_VERSION = "7.0.1";
 
 Settings settings;
 SystemStats stats;
@@ -103,22 +103,6 @@ void resetStats() {
   stats = SystemStats();   // every counter back to its declared default
   saveSettings();
   Serial.println(F("Statistics reset to defaults"));
-}
-
-// ============================================================================
-// FIRMWARE UPDATE PASSWORD
-// ============================================================================
-void loadUpdatePassword(char* dst, size_t cap) {
-  preferences.begin(NVS_NAMESPACE, false);
-  preferences.getString("upd_pass", dst, cap);
-  preferences.end();
-}
-
-void saveUpdatePassword(const char* pass) {
-  preferences.begin(NVS_NAMESPACE, false);
-  preferences.putString("upd_pass", pass);
-  preferences.end();
-  Serial.printf("[OTA] Update password %s\n", pass[0] ? "set" : "cleared");
 }
 
 // ============================================================================

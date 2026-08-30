@@ -116,17 +116,35 @@ The board comes up as a WiFi access point:
 | | |
 |---|---|
 | **Network** | `Green` |
-| **Password** | `ChangeME` |
+| **WiFi password** | `ChangeME` |
+| **Web password** | `GreenAdmin` |
 | **Address** | http://192.168.4.1 |
 
-**Change that password.** It's eight characters because that's the WPA2
-minimum, and it is not a secret — it's in this README. Anyone in radio range of
-an unchanged board can open `/update` and replace the firmware that controls a
-2200 W element. There's a WiFi page in the UI for exactly this, and it takes
-about thirty seconds.
+**Two passwords, because they do two different jobs.** The WiFi password lets a
+device onto the radio, and every phone that has ever joined has a copy of it.
+The web password is what actually guards the controls, the settings page and the
+firmware upload — so it should *not* be a value you hand out to get someone
+online.
 
-Once you're connected you get the whole interface — live temperatures, the
-current mode, setpoint buttons, manual control, and a statistics page.
+**Change both.** Neither is a secret; they are printed above. Anyone in radio
+range of an unchanged board can switch on a 2200 W element. The interface nags
+until the web password is changed, and both take about thirty seconds on the
+Settings page.
+
+Readings stay visible without logging in, and **a manually-energised heater can
+always be switched off without a password** — no expired session or forgotten
+password can leave the element stranded on. A login is needed to switch anything
+*on* or to change a setting.
+
+In automatic mode that exemption does not apply and does not need to: the
+controller owns the relay, and every interlock — the 30-minute runtime cap, the
+5-minute minimum off-time, the `heaterMax` shed and the 50 °C critical trip — is
+active. Manual mode is the one where those are deliberately stripped, which is
+exactly why the unauthenticated off-switch lives there.
+
+Locked out? Hold the **IO0 button on the board for five seconds**. The TFT
+counts down, and everything goes back to the defaults in the table above. See
+[Recovery](#-recovery) below.
 
 ---
 
@@ -281,7 +299,33 @@ A few details worth knowing:
   entire trial window.
 - The **OTA password is not editable from the web UI**, deliberately. It's
   compiled in from `secrets.h`, so losing the web interface can never lock you
-  out of the recovery path.
+  out of the recovery path. It must never be the same string as the WiFi
+  password — sharing the WiFi with a visitor would otherwise hand them the
+  firmware-push credential too.
+
+---
+
+## 🔑 Recovery
+
+This board has no USB port, so every credential it holds has to be recoverable
+without one. **Hold the IO0 button on the carrier board for five seconds.** The
+TFT counts down and you can let go to cancel; at zero the web password, the
+access point and the setpoints all go back to their `secrets.h` defaults. The
+statistics are kept — they are a maintenance record, and nothing about them can
+lock anyone out.
+
+Two things about that button worth knowing:
+
+- It is a **runtime** hold, not a hold-at-boot. GPIO 0 is a strapping pin:
+  holding it down through a reset selects the serial bootloader instead, and
+  the firmware never runs. Let the board boot first, *then* hold it.
+- Readings are unreliable while a **USB-TTL module is plugged in**, because its
+  auto-reset circuit drives the same pin. Unplug it before relying on the
+  button.
+
+If the button is out of reach, `espota` still works — its password is compiled
+in and nothing in the web UI can change it. That is the whole reason it is
+compiled in.
 
 ---
 
@@ -289,12 +333,13 @@ A few details worth knowing:
 
 The production board has no USB port, which concentrates the mind. Two ways in.
 
-**Browser or curl** — a plain POST of `.pio/build/esp32dev/firmware.bin` to
-`/update`, either by dragging the file onto **http://192.168.4.1/update** from
-your phone, or:
+**Browser or curl** — a POST of `.pio/build/esp32dev/firmware.bin` to `/update`,
+either by dragging the file onto **http://192.168.4.1/update** from your phone,
+or with curl. The upload is guarded by the same web session as everything else,
+so log in first and keep the cookie:
 
 ```bash
-curl -F "firmware=@.pio/build/esp32dev/firmware.bin" http://192.168.4.1/update
+curl -c jar -d "pass=YOUR_WEB_PASSWORD" http://192.168.4.1/login && curl -b jar -F "firmware=@.pio/build/esp32dev/firmware.bin" http://192.168.4.1/update
 ```
 
 This is the route to reach for first. It's a single outbound request, and it's
