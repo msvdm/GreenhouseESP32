@@ -13,7 +13,7 @@ enum SystemMode {
   MODE_HEATING,
   MODE_COOLING,
   MODE_COOLDOWN,   // fan purge after heating; also the ventilating fault state
-  MODE_MANUAL,     // operator drives the outputs; interlocks still apply
+  MODE_MANUAL,     // operator drives the outputs; only the critical trip applies
 };
 
 // Order must match FAULT_POLICY[] in control.cpp.
@@ -71,6 +71,16 @@ void logStatistics();
 extern bool manualHeaterReq;
 extern bool manualFanReq;
 
+//
+// Manual is a TEST mode and the protections are stripped to match. The heater
+// and fan relays are independent switches: no airflow proving, no heater-zone
+// arm margin, no heaterMax shed, no thirty-minute runtime cap, no sensor fault
+// gates. A manual heat run has no time limit at all while the zone probe reads.
+//
+// The single protection that survives is the critical trip at
+// settings.heaterCritical, and it needs a readable probe to fire. Heating with
+// no probe is therefore allowed but bounded by MANUAL_BLIND_HEAT_LIMIT - see
+// safetyTick(), which owns that clock.
 void setManualMode(bool on, unsigned long now);
 void setManualHeater(bool on, unsigned long now);
 void setManualFan(bool on, unsigned long now);
@@ -79,6 +89,11 @@ void setManualFan(bool on, unsigned long now);
 // when there is nothing holding it off. Shown on the web page so a blocked
 // request looks blocked rather than broken.
 const char* manualHoldReason();
+
+// Seconds before an unsupervised manual heat run is shed. Zero whenever the
+// zone probe is readable - so any non-zero value means the element is running
+// with nothing but this countdown limiting it.
+unsigned long manualBlindSecondsLeft();
 
 // ============================================================================
 // SIMULATED SENSORS

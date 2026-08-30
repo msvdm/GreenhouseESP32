@@ -16,6 +16,14 @@ static unsigned long lastHeaterOffTime = 0;
 static unsigned long fanStartTime = 0;
 static unsigned long fanCooldownStart = 0;
 
+// When the manual heater started running with no readable zone probe. Zero
+// whenever there is a real reading, or whenever the element is off.
+static unsigned long blindSince = 0;
+
+// Manual taps reach the relays through here rather than waiting for the next
+// control pass, so this has to be declared before the setters that call it.
+static void driveManual(unsigned long now);
+
 #define CYCLE_HISTORY_SIZE 10
 static unsigned long heatingCycleTimestamps[CYCLE_HISTORY_SIZE] = { 0 };
 static int cycleHistoryIndex = 0;
@@ -137,6 +145,14 @@ void setManualMode(bool on, unsigned long now) {
     // element energised.
     manualFanReq = fansOn;
     manualHeaterReq = false;
+
+    // The latch is deliberately NOT cleared here. Clearing it made every
+    // manual round trip re-raise the same condition on the way back to
+    // automatic, and each of those counted as a fresh safety shutdown - the
+    // exact statistics inflation the transition guard in enterFault() exists
+    // to prevent. Manual ignores these faults instead of erasing them:
+    // driveManual() refuses only on the critical trip, and the web UI blocks
+    // the heater tap only on that same one.
   } else {
     manualHeaterReq = false;
     manualFanReq = false;
@@ -154,30 +170,46 @@ void setManualMode(bool on, unsigned long now) {
   }
 
   manualHold = "";
+
+  // Both directions. A stale timestamp left over from a previous manual session
+  // would make (now - blindSince) already exceed the limit, so the first blind
+  // heat request after re-entering manual would be shed on the spot - a
+  // protection firing against the wrong run.
+  blindSince = 0;
+
   settingsChangedTime = (now == 0) ? 1 : now;   // debounced write, handled by loop()
   Serial.printf("Control mode: %s\n", on ? "MANUAL" : "AUTOMATIC");
 }
 
 // Both apply to the relays immediately rather than waiting up to five seconds
 // for the next control pass. A test switch that appears to do nothing for five
-// seconds gets pressed again, and pressing a 2200 W heater switch twice
-// because it looked broken is not a failure mode worth having.
+// seconds gets pressed again, and pressing a 2200 W heater switch twice because
+// it looked broken is not a failure mode worth having.
+//
+// Each records the request and then runs driveManual() itself, so exactly one
+// function decides what manual does with a relay. The earlier version made part
+// of that decision here and part of it there, and the two had to be kept in
+// step by hand.
 void setManualHeater(bool on, unsigned long now) {
   if (!settings.manualMode) return;
   manualHeaterReq = on;
-
-  // Switching ON only starts the fans - the element itself is left to
-  // driveManual(), which is where the interlocks live. Timing the airflow
-  // delay from the press rather than from the next pass just means the
-  // operator waits five seconds instead of up to ten.
-  if (on) setFans(true, now);
-  else    setHeater(false, now);
+  driveManual(now);
 }
 
 void setManualFan(bool on, unsigned long now) {
   if (!settings.manualMode) return;
   manualFanReq = on;
-  setFans(on || manualHeaterReq, now);   // the heater's requirement still wins
+  driveManual(now);
+}
+
+// Seconds before an unsupervised manual heat run is shed by safetyTick(). Zero
+// whenever the zone probe is readable, so the web UI can treat any non-zero
+// value as "the only protection left is a countdown".
+unsigned long manualBlindSecondsLeft() {
+  if (blindSince == 0) return 0;
+  const unsigned long elapsed = millis() - blindSince;
+  if (elapsed >= MANUAL_BLIND_HEAT_LIMIT) return 0;
+  return (MANUAL_BLIND_HEAT_LIMIT - elapsed) / 1000;
 }
 
 const char* manualHoldReason() { return manualHold; }
@@ -251,14 +283,36 @@ static void enterFault(Fault f, unsigned long now) {
   // lastHeaterOffTime: is there residual heat that actually needs purging?
   // On a cold boot with nothing wired the answer is no, and closing the fan
   // relay to purge an element that has never run is merely surprising.
-  const bool residualHeat = heaterOn || (lastHeaterOffTime != 0);
+  //
+  // "The heater has run at some point this boot" is NOT that question, and
+  // testing it that way was a defect: lastHeaterOffTime stays set for the rest
+  // of the boot, so every later fault re-opened a purge for an element that
+  // went cold long ago. Combined with the latched-fault case below it meant a
+  // single manual heat run left the fan on for good, and switching to manual
+  // and back started it again every time. A full purge length since the
+  // element was last off is exactly the point at which there is nothing left
+  // to purge.
+  const bool residualHeat = heaterOn ||
+      (lastHeaterOffTime != 0 && (now - lastHeaterOffTime) < FAN_COOLDOWN_TIME);
 
   // The heater comes off on every call, including re-assertions.
   setHeater(false, now);
 
   // Only the transition into a fault is counted and logged; a condition that
   // persists across read cycles must not inflate the statistics.
-  if (activeFault == f) return;
+  if (activeFault == f) {
+    // A purge is a fixed length, and it has to end even though the fault has
+    // not. The gate in controlSystem() returns here on every pass while a
+    // sensor fault is latched, so decideMode() - which owns the normal
+    // COOLDOWN timeout - is never reached to end it. For a missing probe the
+    // condition never clears at all, so without this the fan ran forever.
+    if (currentMode == MODE_COOLDOWN && (now - fanCooldownStart) >= FAN_COOLDOWN_TIME) {
+      setFans(false, now);
+      currentMode = MODE_IDLE;
+      Serial.println(F("Purge complete - fans off (fault still latched)"));
+    }
+    return;
+  }
   activeFault = f;
 
   const FaultPolicy& p = FAULT_POLICY[f];
@@ -377,19 +431,24 @@ static void driveHeating(unsigned long now) {
   Serial.printf("Heater ON: avg=%.1fC heater=%.1fC\n", airTempForControl(), heat);
 }
 
-// Manual execution. Interlocks 1 and 2 - the five-minute rest and the
-// cycles-per-hour cap - are deliberately bypassed here so the system can be
-// exercised repeatedly during a test. Everything that protects the hardware
-// rather than its duty cycle stays exactly as it is in automatic: airflow
-// before heat, a valid heater-zone reading, the zone limit with its margin,
-// and (from controlSystem) the thirty-minute runtime cap.
+// Manual execution. Manual is a TEST mode and is now treated as one: the two
+// relays are independent switches and every zone protection is deliberately
+// absent. Gone from here are the airflow-proving delay, the requirement for a
+// valid zone reading and the heaterMax arm margin; gone from controlSystem()
+// are the sensor fault gates and the thirty-minute runtime cap; gone from
+// safetyTick() is the heaterMax shed. The fan no longer follows the heater
+// either - testing the relays freely means the element can be energised with
+// nothing moving air over it, and that is the operator's call to make.
 //
-// Bypassing those two does not stop them being RECORDED. setHeater() still
+// What is left is the critical trip in safetyTick(), and the clock that runs
+// when there is no probe for that trip to fire against. That is the whole of it.
+//
+// None of this stops the bypassed limits being RECORDED. setHeater() still
 // stamps lastHeaterOffTime and the cycle history, so returning to automatic
-// applies both limits immediately, counting the manual cycles as history.
+// re-applies the five-minute rest and the cycles-per-hour cap immediately,
+// counting every manual cycle as history.
 static void driveManual(unsigned long now) {
-  // A heater request implies airflow whatever the fan toggle says.
-  setFans(manualFanReq || manualHeaterReq, now);
+  setFans(manualFanReq, now);          // independent of the heater, on purpose
 
   if (!manualHeaterReq) {
     setHeater(false, now);
@@ -397,25 +456,20 @@ static void driveManual(unsigned long now) {
     return;
   }
 
-  if (now - fanStartTime < FAN_STARTUP_DELAY) {
-    manualHold = "proving airflow";
-    return;
-  }
-
-  // The real sensor, through the upward-only override. No path here lets a
-  // simulated value energise an element that should stay off.
-  const float heat = heaterTempForControl();
-  if (!TEMP_IS_VALID(heat) || heat <= 0.0f) {
-    manualHold = "no heater zone reading";
-    return;
-  }
-  if (heat >= settings.heaterMax - HEATER_ARM_MARGIN) {
-    manualHold = "heater zone too hot";
+  // The one refusal left. A latched critical trip must need a deliberate second
+  // press to undo: without this, a stale tab reasserting its request would put
+  // the element straight back on at the fan's own rated ambient.
+  if (activeFault == FAULT_HEATER_CRITICAL) {
+    manualHold = "critical trip";
+    setHeater(false, now);
     return;
   }
 
   manualHold = "";
-  if (!heaterOn) Serial.printf("MANUAL heater ON: heater=%.1fC\n", heat);
+  if (!heaterOn) {
+    Serial.printf("MANUAL heater ON: heater=%.1fC%s\n", sensorData.heaterTemp,
+                  TEMP_IS_VALID(sensorData.heaterTemp) ? "" : "  [NO PROBE - UNSUPERVISED]");
+  }
   setHeater(true, now);
 }
 
@@ -461,6 +515,31 @@ void safetyTick(unsigned long now) {
   const float heat = heaterTempForControl();
 
   if (!TEMP_IS_VALID(heat)) {
+    // Manual runs blind on purpose - it is the only way to exercise the relays
+    // with nothing wired - so there is no fault escalation and no forced purge
+    // here. What there is instead is a clock: with no reading, the critical
+    // trip below cannot fire, so for this whole window nothing at all is
+    // limiting 2200 W. MANUAL_BLIND_HEAT_LIMIT is how long that is allowed to
+    // last, and it is the only thing standing between a disconnected probe and
+    // an element that runs until someone walks out to the greenhouse.
+    if (settings.manualMode) {
+      if (!heaterOn) { blindSince = 0; return; }
+      if (blindSince == 0) {
+        blindSince = now;
+        Serial.println(F("MANUAL: heating with no zone reading - unsupervised clock started"));
+      }
+      // Elapsed difference, never (now - LIMIT): the latter underflows for the
+      // first five minutes after boot and again at the millis() wrap, which
+      // would silently disable exactly this.
+      if ((now - blindSince) >= MANUAL_BLIND_HEAT_LIMIT) {
+        Serial.println(F("MANUAL: unsupervised heat limit reached - shedding element"));
+        manualHeaterReq = false;      // must be pressed again, deliberately
+        setHeater(false, now);
+        blindSince = 0;
+      }
+      return;
+    }
+
     // The element's temperature cannot be verified. Shed it here at 1 Hz
     // rather than waiting up to 5 s for the next full control pass.
     if (heaterOn) {
@@ -473,13 +552,19 @@ void safetyTick(unsigned long now) {
     return;
   }
 
+  // A real reading: the critical trip is live again, so the clock is moot.
+  blindSince = 0;
+
+  // The one protection manual keeps. Unchanged in either mode.
   if (heat >= settings.heaterCritical) {
     Serial.printf("CRITICAL: heater zone %.1fC exceeds fan rated ambient\n", heat);
     enterFault(FAULT_HEATER_CRITICAL, now);
     return;
   }
 
-  if (heat >= settings.heaterMax && heaterOn) {
+  // Automatic only. In manual the operator owns the element up to the critical
+  // trip, which is the whole point of stripping this one.
+  if (!settings.manualMode && heat >= settings.heaterMax && heaterOn) {
     // Over the element limit but below the fan's: shed the heater and purge.
     // Routed through applyMode so runtime accounting and the minimum-off-time
     // interlock are applied here exactly as on every other shutdown path.
@@ -497,36 +582,48 @@ void controlSystem(unsigned long now) {
   // Before the gates, so an expiry still happens while a fault is latched.
   expireSim(now);
 
-  // Gate: the controller may not operate on inputs it cannot trust. The heater
-  // zone gates read sensorData directly - the real probe, no override - so a
-  // simulated value can never satisfy one of them.
-  if (!sensorData.heaterDetected || heaterSensorFailed()) {
-    enterFault(FAULT_HEATER_SENSOR_LOST, now);
-    return;
-  }
-  // A simulated AIR temperature does satisfy the air-sensor gate. That is the
-  // point of it - exercising the mode machine on a bench with nothing but the
-  // heater-zone probe wired - and it is safe because every heater protection
-  // sits downstream of this and still reads the real sensor.
-  if (!sim.airActive && airSensorsFailed()) {
-    enterFault(FAULT_AIR_SENSORS_LOST, now);
-    return;
-  }
-  if (!TEMP_IS_VALID(airTempForControl()) || !TEMP_IS_VALID(sensorData.heaterTemp)) {
-    enterFault(FAULT_INVALID_READINGS, now);
-    return;
+  // Automatic may not operate on inputs it cannot trust. Manual skips all three
+  // deliberately: every one of them ends in enterFault(), which takes the relays
+  // away from the operator who is standing there testing them. A missing sensor
+  // is an expected bench condition, not an emergency, and the consequence of
+  // ignoring it - heating with no supervision - is bounded by the clock in
+  // safetyTick() instead.
+  if (!settings.manualMode) {
+    // The heater zone gates read sensorData directly - the real probe, no
+    // override - so a simulated value can never satisfy one of them.
+    if (!sensorData.heaterDetected || heaterSensorFailed()) {
+      enterFault(FAULT_HEATER_SENSOR_LOST, now);
+      return;
+    }
+    // A simulated AIR temperature does satisfy the air-sensor gate. That is the
+    // point of it - exercising the mode machine on a bench with nothing but the
+    // heater-zone probe wired - and it is safe because every heater protection
+    // sits downstream of this and still reads the real sensor.
+    if (!sim.airActive && airSensorsFailed()) {
+      enterFault(FAULT_AIR_SENSORS_LOST, now);
+      return;
+    }
+    if (!TEMP_IS_VALID(airTempForControl()) || !TEMP_IS_VALID(sensorData.heaterTemp)) {
+      enterFault(FAULT_INVALID_READINGS, now);
+      return;
+    }
   }
 
-  // Inputs are valid and the heater zone is within limits: release any latched
-  // fault so a genuinely new event is counted and logged again.
-  if (heaterTempForControl() < settings.heaterMax) activeFault = FAULT_NONE;
+  // Release a latched fault so a genuinely new event is counted and logged
+  // again. This needs a REAL reading, not just a value below the limit: a
+  // disconnected probe reports -127, which is below every threshold there is,
+  // and would otherwise clear a critical trip by virtue of having failed.
+  if (TEMP_IS_VALID(sensorData.heaterTemp) &&
+      heaterTempForControl() < settings.heaterMax) {
+    activeFault = FAULT_NONE;
+  }
 
   // Hard interlock: maximum continuous runtime. Routed through applyMode so it
   // gets the same cooldown entry handling as every other path into COOLDOWN.
-  // In manual it also drops the heater request: with the minimum rest
-  // bypassed, leaving that request standing would re-energise the element on
-  // the very next pass and make the cap meaningless.
-  if (heaterOn && (now - heaterStartTime >= MAX_HEATER_RUNTIME)) {
+  // Automatic only - in manual this is one of the stripped protections, so a
+  // manual heat run has no time limit at all while the probe is readable.
+  if (!settings.manualMode && heaterOn &&
+      (now - heaterStartTime >= MAX_HEATER_RUNTIME)) {
     Serial.println(F("Max heater runtime reached - forcing cooldown"));
     manualSafetyShed(true);
     applyMode(MODE_COOLDOWN, now);

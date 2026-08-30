@@ -73,10 +73,32 @@ maps each fault to its counter and whether it ventilates. Add a row, don't add
 an `if`. Note the deliberate asymmetry: the critical trip does *not* ventilate,
 because `heaterCritical` is the fan's own rated ambient.
 
+**A purge is finite; a fault is not.** Two rules in `enterFault()`, both of which
+exist because their absence stranded the fan on permanently:
+
+- `residualHeat` asks whether the element ran *recently* - within
+  `FAN_COOLDOWN_TIME` - not whether it has ever run this boot. Testing
+  `lastHeaterOffTime != 0` meant every fault for the rest of the boot re-opened
+  a purge for an element that went cold hours ago.
+- The re-assertion path ends the purge once `FAN_COOLDOWN_TIME` has elapsed.
+  While a sensor fault is latched, the gate at the top of `controlSystem()`
+  returns before `decideMode()`, which is what normally times COOLDOWN out - so
+  nothing else can ever end it. With a probe that never comes back, that was
+  forever.
+
 **Pages are static.** Everything dynamic goes through `/status`, which the UI
 polls anyway. Do not render values into HTML server-side — the old code did, and
 JavaScript overwrote every one of them two seconds later. Serve with `send_P`,
 never build pages with `String`.
+
+**The browser update path is password-guarded at runtime.** `POST /update`
+checks the `X-Update-Auth` header on `UPLOAD_FILE_START`, before `otaPrepare()`
+and `Update.begin()` - a refused upload must not shed the heater, release the
+watchdog or open the flash partition. It is a header rather than a form field
+precisely because headers are parsed before the body: a field would arrive after
+the image had already been written. The password lives in NVS (`upd_pass`), is
+empty by default, and is unrelated to `OTA_PASSWORD` in `secrets.h`, which is
+compiled in and guards espota.
 
 **Bump the `?v=` on `/style.css` and `/ui.js` whenever either changes.** They
 once carried a 24-hour `max-age`, and after an OTA browsers kept serving the old
@@ -90,7 +112,36 @@ adding fields too - a truncated `/status` takes the whole UI down with it.
 **Manual mode adds no controls.** The existing badges and readouts become the
 controls, gated on `.tap`/`.simtap`. Resist adding a manual-only card: an earlier
 version had two, and they were both clutter and a second thing to keep in sync
-with the automatic UI.
+with the automatic UI. Cards that do nothing in manual are dimmed with `.card.off`
+rather than hidden, so the page does not reflow when the mode switch is flipped.
+
+**Manual mode is a TEST mode and its protections are deliberately stripped.**
+Since v6.2.0 the heater and fan relays are independent switches with no airflow
+proving, no heater-zone arm margin, no `heaterMax` shed, no thirty-minute runtime
+cap and no sensor fault gates. `driveManual()` energises the element on request.
+This was asked for explicitly, and it is not an oversight to be tidied up.
+
+Exactly two things survive, and both must:
+
+- **The critical trip** at `settings.heaterCritical` in `safetyTick()`, which
+  still routes through `enterFault(FAULT_HEATER_CRITICAL)` and still does not
+  ventilate. `driveManual()` refuses a request while that fault is latched, so
+  clearing it needs a real reading below `heaterMax` and a second deliberate press.
+- **`MANUAL_BLIND_HEAT_LIMIT`**, the clock in `safetyTick()` that runs when the
+  element is on and the zone probe is unreadable. That is the one state where the
+  critical trip cannot fire, so nothing at all is limiting 2200 W; five minutes is
+  how long that is allowed to last. `blindSince` resets on a real reading and on
+  every manual-mode transition - a stale timestamp would shed the *next* run on
+  the spot, which looks exactly like a protection misfiring.
+
+Faults other than the critical trip stay LATCHED through manual - manual ignores
+them rather than erasing them. `driveManual()` refuses only on
+`FAULT_HEATER_CRITICAL`, and the web UI gates the heater badge on the `crit`
+field in `/status` rather than on `fault`. An earlier attempt cleared the latch
+on entering manual instead; that made every manual round trip re-raise the same
+condition on the way back to automatic, and each one counted as a fresh safety
+shutdown - exactly the statistics inflation the transition guard in
+`enterFault()` exists to prevent.
 
 **`clampSetpoints()` after any setpoint change and after `loadSettings()`.**
 NVS is untrusted input. Individual ranges cannot express `tempMin < tempMax`.
@@ -122,10 +173,36 @@ it is invisible from across the greenhouse.
 
 **Web handlers set requests; `control.cpp` decides.** The manual endpoints are
 not an exception to the relay-writer rule - `/output` records what the operator
-asked for, and `driveManual()` applies the same interlocks every automatic path
-uses. Manual deliberately bypasses only the minimum rest and the cycles-per-hour
-cap, and even those are still recorded, so automatic applies them again the
-moment it takes over.
+asked for, and `driveManual()` decides. That stays true even though manual now
+has very little left to decide: `setManualHeater()` and `setManualFan()` record
+the request and then call `driveManual()` themselves, so a tap moves the relay at
+once instead of up to five seconds later, and there is still exactly one function
+that touches a relay in manual. Every bypassed limit is still RECORDED -
+`setHeater()` stamps `lastHeaterOffTime` and the cycle history regardless - so
+automatic re-applies the five-minute rest and the cycles-per-hour cap the moment
+it takes over.
+
+**The WiFi trial covers the access point only.** `netApplyAp()` and
+`netFactoryReset()` go on trial because they can lock the operator out of the
+board; `netApplySta()` applies and commits immediately because it cannot. The old
+code put everything on trial through one `applyRadio()` that tore the AP down on
+every change, so joining a home network cost the operator their access point and
+a 60-second confirmation for nothing. The keep/revert prompt lives on the CONTROL
+page, driven by `trial` in `/status`, because that is where someone lands after
+reconnecting.
+
+**`net.cpp` owns mDNS; `ota.cpp` is told not to start it.** `ArduinoOTA::begin()`
+calls `MDNS.begin()` internally, so without `setMdnsEnabled(false)` the two race
+over one responder and the configured hostname sometimes loses. `net.cpp` must
+therefore call `MDNS.enableArduino(3232, true)` itself - dropping it removes
+espota discovery from a board with no USB recovery path.
+
+**Any WiFi scan must be asynchronous.** `WiFi.scanNetworks(true, false)`, polled
+through `netScanState()`. A blocking scan parks `loop()` for two to four seconds,
+which stalls the 1 Hz heater-zone read and `safetyTick()` with it. The 20 s task
+watchdog does not catch that - it is simply four seconds of an unsupervised
+element. Note that `scanNetworks()` calls `WiFi.enableSTA(true)` internally, so a
+scan works with the station side switched off and leaves the radio in AP_STA.
 
 ## Working here
 

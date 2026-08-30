@@ -67,6 +67,14 @@ extern const char* FIRMWARE_VERSION;
 // on feeding the controller invented weather indefinitely.
 #define SIM_TIMEOUT 900000UL               // 15 min, then simulation clears
 
+// Manual mode is a TEST mode: the zone protections above are deliberately not
+// applied to it, and the critical trip is the only one left standing. That trip
+// needs a readable heater-zone probe to fire, so heating with no probe at all is
+// heating with nothing whatsoever limiting 2200 W. It is still allowed - it is
+// the only way to exercise the relays on a bench with no sensors wired - but on
+// a clock, and the clock resets the moment a real reading comes back.
+#define MANUAL_BLIND_HEAT_LIMIT 300000UL   // 5 min unsupervised, then shed
+
 // ============================================================================
 // TIMING INTERVALS
 // ============================================================================
@@ -113,6 +121,8 @@ extern Settings settings;
 // board comes up on.
 #define WIFI_SSID_LEN 33   // 32 characters + NUL
 #define WIFI_PASS_LEN 64   // 63 characters + NUL (WPA2 maximum)
+#define WIFI_HOST_LEN 33   // mDNS label: 32 characters + NUL
+#define WIFI_ADDR_LEN 16   // "255.255.255.255" + NUL
 
 struct WifiConfig {
   bool staEnabled = false;              // Join an existing network as well
@@ -120,6 +130,15 @@ struct WifiConfig {
   char apPass[WIFI_PASS_LEN]  = { 0 };
   char staSsid[WIFI_SSID_LEN] = { 0 };  // The network to join, when enabled
   char staPass[WIFI_PASS_LEN] = { 0 };
+
+  // How the board is addressed. The AP always has a numeric address - mDNS is
+  // an ADDITIONAL name, never a replacement - so both are stored rather than
+  // one field that changes meaning. Flipping the switch on the settings page
+  // therefore cannot lose the other value, and if .local fails to resolve on
+  // some client the numeric address is still exactly where it was.
+  char apIp[WIFI_ADDR_LEN]    = { 0 };  // AP address, e.g. "192.168.4.1"
+  bool mdnsEnabled = false;             // Announce <hostname>.local
+  char hostname[WIFI_HOST_LEN] = { 0 }; // "greenhouse" -> greenhouse.local
 };
 
 // The compiled-in factory configuration, from secrets.h.
@@ -135,6 +154,22 @@ void saveWifiConfig(const WifiConfig& cfg);
 // factory value rather than being silently truncated into something that
 // almost works. Returns false if it had to change anything.
 bool validateWifiConfig(WifiConfig& cfg);
+
+// ============================================================================
+// FIRMWARE UPDATE PASSWORD
+// ============================================================================
+// Guards the browser upload at POST /update, which had no authentication at
+// all: anyone who could reach the board could replace the firmware driving a
+// 2200 W contactor. Empty by default, because a board that demands a password
+// nobody has set yet is a board you cannot update.
+//
+// Separate from OTA_PASSWORD in secrets.h. That one is compiled in and guards
+// the espota path; this one is operator-set at runtime and guards the browser
+// path. Changing this cannot lock you out of espota, and vice versa.
+#define UPDATE_PASS_LEN 64   // 63 characters + NUL
+
+void loadUpdatePassword(char* dst, size_t cap);
+void saveUpdatePassword(const char* pass);
 
 // ============================================================================
 // STATISTICS

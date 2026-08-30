@@ -12,7 +12,17 @@
 #define AP_PASSWORD "ChangeME"
 #endif
 
-const char* FIRMWARE_VERSION = "6.1.1";
+// 192.168.4.1 is the ESP32 SoftAP default. Keeping it as the factory value
+// means a reset always lands somewhere documented on the board and in every
+// tutorial the operator is likely to be holding.
+#ifndef AP_ADDRESS
+#define AP_ADDRESS "192.168.4.1"
+#endif
+#ifndef MDNS_HOSTNAME
+#define MDNS_HOSTNAME "greenhouse"
+#endif
+
+const char* FIRMWARE_VERSION = "6.2.1";
 
 Settings settings;
 SystemStats stats;
@@ -96,6 +106,22 @@ void resetStats() {
 }
 
 // ============================================================================
+// FIRMWARE UPDATE PASSWORD
+// ============================================================================
+void loadUpdatePassword(char* dst, size_t cap) {
+  preferences.begin(NVS_NAMESPACE, false);
+  preferences.getString("upd_pass", dst, cap);
+  preferences.end();
+}
+
+void saveUpdatePassword(const char* pass) {
+  preferences.begin(NVS_NAMESPACE, false);
+  preferences.putString("upd_pass", pass);
+  preferences.end();
+  Serial.printf("[OTA] Update password %s\n", pass[0] ? "set" : "cleared");
+}
+
+// ============================================================================
 // NETWORK CONFIGURATION
 // ============================================================================
 static void copyField(char* dst, size_t cap, const char* src) {
@@ -109,7 +135,43 @@ WifiConfig factoryWifiConfig() {
   copyField(cfg.apPass, WIFI_PASS_LEN, AP_PASSWORD);
   cfg.staSsid[0] = 0;
   cfg.staPass[0] = 0;
+  copyField(cfg.apIp, WIFI_ADDR_LEN, AP_ADDRESS);
+  copyField(cfg.hostname, WIFI_HOST_LEN, MDNS_HOSTNAME);
+  cfg.mdnsEnabled = true;
   return cfg;
+}
+
+// A dotted quad the SoftAP can actually be given: four octets, and a last one
+// that is neither the network nor the broadcast address. Rejecting .0 and .255
+// matters because softAPConfig() accepts them and then hands out a DHCP range
+// no client can use - the board simply stops being reachable, with no error.
+static bool addressUsable(const char* addr) {
+  int a, b, c, d;
+  char trailing;
+  if (sscanf(addr, "%d.%d.%d.%d%c", &a, &b, &c, &d, &trailing) != 4) return false;
+  if (a < 1 || a > 254) return false;
+  if (b < 0 || b > 255) return false;
+  if (c < 0 || c > 255) return false;
+  if (d < 1 || d > 254) return false;
+  return true;
+}
+
+// A single DNS label, which is all an mDNS hostname is: letters, digits and
+// interior hyphens. Lowercased in place because mDNS is case-insensitive but
+// clients are not always consistent about it, and a name that resolves from one
+// phone and not another is worse than one that never worked.
+static bool hostnameUsable(char* host) {
+  const size_t len = strlen(host);
+  if (len == 0 || len > 32) return false;
+  if (host[0] == '-' || host[len - 1] == '-') return false;
+  for (size_t i = 0; i < len; i++) {
+    char ch = host[i];
+    if (ch >= 'A' && ch <= 'Z') ch = ch - 'A' + 'a';
+    const bool ok = (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '-';
+    if (!ok) return false;
+    host[i] = ch;
+  }
+  return true;
 }
 
 // A password the radio will actually accept: either open, or long enough for
@@ -136,6 +198,21 @@ bool validateWifiConfig(WifiConfig& cfg) {
     ok = false;
   }
 
+  // The address is an AP field and gets the AP's treatment: fall back rather
+  // than reject, because there has to be a way back in.
+  if (!addressUsable(cfg.apIp)) {
+    copyField(cfg.apIp, WIFI_ADDR_LEN, factory.apIp);
+    ok = false;
+  }
+
+  // A bad hostname only costs the .local name, never reachability, so this one
+  // could have been switched off instead. It falls back for consistency: every
+  // other field here ends up valid rather than absent.
+  if (!hostnameUsable(cfg.hostname)) {
+    copyField(cfg.hostname, WIFI_HOST_LEN, factory.hostname);
+    ok = false;
+  }
+
   // The station side has no such obligation: if it is unusable, just leave it
   // switched off. The board keeps hosting its own AP regardless.
   if (cfg.staEnabled) {
@@ -153,11 +230,14 @@ void loadWifiConfig(WifiConfig& cfg) {
   const WifiConfig factory = factoryWifiConfig();
   preferences.begin(NVS_NAMESPACE, false);
 
-  cfg.staEnabled = preferences.getBool("wifi_sta_en", factory.staEnabled);
+  cfg.staEnabled   = preferences.getBool("wifi_sta_en", factory.staEnabled);
+  cfg.mdnsEnabled  = preferences.getBool("mdns_en", factory.mdnsEnabled);
   preferences.getString("ap_ssid",  cfg.apSsid,  WIFI_SSID_LEN);
   preferences.getString("ap_pass",  cfg.apPass,  WIFI_PASS_LEN);
   preferences.getString("sta_ssid", cfg.staSsid, WIFI_SSID_LEN);
   preferences.getString("sta_pass", cfg.staPass, WIFI_PASS_LEN);
+  preferences.getString("ap_ip",    cfg.apIp,    WIFI_ADDR_LEN);
+  preferences.getString("host",     cfg.hostname, WIFI_HOST_LEN);
 
   preferences.end();
 
@@ -166,6 +246,12 @@ void loadWifiConfig(WifiConfig& cfg) {
     copyField(cfg.apSsid, WIFI_SSID_LEN, factory.apSsid);
     copyField(cfg.apPass, WIFI_PASS_LEN, factory.apPass);
   }
+
+  // Upgrading from a firmware that had no address or hostname: these keys are
+  // simply absent, which is not corruption. Seed them from the factory values
+  // rather than letting validateWifiConfig() report a fault that isn't one.
+  if (cfg.apIp[0] == 0)     copyField(cfg.apIp, WIFI_ADDR_LEN, factory.apIp);
+  if (cfg.hostname[0] == 0) copyField(cfg.hostname, WIFI_HOST_LEN, factory.hostname);
 
   if (!validateWifiConfig(cfg)) {
     Serial.println(F("[WiFi] Stored configuration was invalid - fell back to factory"));
@@ -176,10 +262,13 @@ void saveWifiConfig(const WifiConfig& cfg) {
   preferences.begin(NVS_NAMESPACE, false);
 
   preferences.putBool("wifi_sta_en", cfg.staEnabled);
+  preferences.putBool("mdns_en", cfg.mdnsEnabled);
   preferences.putString("ap_ssid",  cfg.apSsid);
   preferences.putString("ap_pass",  cfg.apPass);
   preferences.putString("sta_ssid", cfg.staSsid);
   preferences.putString("sta_pass", cfg.staPass);
+  preferences.putString("ap_ip",    cfg.apIp);
+  preferences.putString("host",     cfg.hostname);
 
   preferences.end();
   Serial.println(F("[WiFi] Configuration committed to NVS"));
