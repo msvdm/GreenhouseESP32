@@ -4,224 +4,158 @@
 #include <SPI.h>
 #include "config.h"
 #include "control.h"
+#include "net.h"
 #include "sensors.h"
+#include "settings.h"
 
-static Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, TFT_RST);
+#define W 160
+#define H 128
 
-static bool chromeDrawn = false;
-static float lastDrawnAvg = -999.0f;
-static String networkLine = "";
+// RGB565
+#define C_BG      0x0000
+#define C_BAR     0x2104
+#define C_TEXT    0xFFFF
+#define C_DIM     0x8410
+#define C_GREEN   0x07E0
+#define C_YELLOW  0xFFE0
+#define C_CYAN    0x07FF
+#define C_ORANGE  0xFD20
+#define C_RED     0xF800
+#define C_HEAT    0xC800
+#define C_FAN     0x033F
 
-// Row layout, kept in one place so the fillRect/setCursor pairs cannot drift.
-#define ROW_NET      5
-#define ROW_AVG     20
-#define ROW_HEATER  55
-#define ROW_HOURS   68
-#define ROW_FAN     83
-#define ROW_LEFT    98
-#define ROW_RIGHT  110
-#define SCREEN_W   160
+static Adafruit_ST7735 tft(&SPI, PIN_TFT_CS, PIN_TFT_DC, PIN_TFT_RST);
+static GFXcanvas16* canvas = nullptr;
 
-static void clearRow(int y, int h) {
-  tft.fillRect(0, y, SCREEN_W, h, ST77XX_BLACK);
+static void push() {
+  tft.drawRGBBitmap(0, 0, canvas->getBuffer(), W, H);
+}
+
+static void centered(const char* s, int y, uint8_t size, uint16_t color) {
+  canvas->setTextSize(size);
+  canvas->setTextColor(color);
+  canvas->setCursor((W - (int)strlen(s) * 6 * size) / 2, y);
+  canvas->print(s);
 }
 
 void displayBegin() {
+  // Must come before initR(): the library's own SPI.begin() is then a no-op,
+  // so the bus keeps these pins instead of the VSPI defaults.
+  SPI.begin(PIN_TFT_SCLK, -1, PIN_TFT_MOSI, -1);
   tft.initR(INITR_BLACKTAB);
   tft.setRotation(1);
-  tft.fillScreen(ST77XX_BLACK);
-  tft.setTextColor(ST77XX_WHITE);
-  tft.setTextSize(1);
+  tft.fillScreen(C_BG);
+  canvas = new GFXcanvas16(W, H);
+  canvas->cp437(true);   // char 248 = degree sign
+  canvas->setTextWrap(false);
+  displayMessage("GREENHOUSE", "v" FW_VERSION, "starting...", C_GREEN);
 }
 
-void displaySplash(int numLeft, int numRight, bool heaterDetected) {
-  tft.setCursor(0, 0);
-  tft.printf("Greenhouse v%s\n", FIRMWARE_VERSION);
-  tft.printf("Sensors: L%d R%d H%d\n", numLeft, numRight, heaterDetected ? 1 : 0);
+// 74x43 box: name, big ON/OFF, and why (max 10 characters).
+static void relayBox(int x, const char* title, bool on, uint16_t onColor, const char* detail) {
+  const int y = 57, w = 74, h = 43;
+  if (on) canvas->fillRoundRect(x, y, w, h, 5, onColor);
+  else    canvas->drawRoundRect(x, y, w, h, 5, C_DIM);
+
+  canvas->setTextColor(on ? C_TEXT : C_DIM);
+  canvas->setTextSize(1);
+  canvas->setCursor(x + 6, y + 4);
+  canvas->print(title);
+  canvas->setTextSize(2);
+  canvas->setCursor(x + 6, y + 15);
+  canvas->print(on ? "ON" : "OFF");
+  canvas->setTextSize(1);
+  canvas->setCursor(x + 6, y + 33);
+  canvas->print(detail);
 }
 
-void displayNetwork(const String& ip) {
-  networkLine = ip;
+void displayUpdate() {
+  if (!canvas) return;
+  canvas->fillScreen(C_BG);
+  char buf[32];
 
-  // During startup this is still part of the splash, printed at the cursor
-  // the splash left behind.
-  if (!chromeDrawn) {
-    tft.printf("IP: %s\n", ip.c_str());
-    return;
-  }
-
-  // Called again later - a WiFi change applied at runtime. Printing here
-  // would land wherever the cursor happens to be, so mark the chrome dirty
-  // and let the normal repaint own the screen.
-  chromeDrawn = false;
-}
-
-void updateDisplay() {
-  if (!chromeDrawn) {
-    tft.fillScreen(ST77XX_BLACK);
-    tft.setTextSize(1);
-    tft.setTextColor(ST77XX_GREEN);
-    tft.setCursor(5, ROW_NET);
-    tft.printf("IP: %s", networkLine.c_str());
-    chromeDrawn = true;
-    lastDrawnAvg = -999.0f;
-  }
-
-  const float avg = sensorData.averageTemp;
-
-  // Average temperature - only repainted when it actually moves, because a
-  // full-width repaint at 0.5 Hz is visibly flickery.
-  if (fabsf(avg - lastDrawnAvg) > 0.1f) {
-    clearRow(ROW_AVG, 30);
-    tft.setCursor(1, ROW_AVG);
-    tft.setTextSize(2);
-    tft.setTextColor(ST77XX_YELLOW);
-    tft.print(F("Avg:"));
-    if (TEMP_IS_VALID(avg)) {
-      if (avg < settings.tempMin)      tft.setTextColor(ST77XX_CYAN);
-      else if (avg > settings.tempMax) tft.setTextColor(ST77XX_ORANGE);
-      else                             tft.setTextColor(ST77XX_YELLOW);
-      tft.printf("%.1fC", avg);
-    } else {
-      tft.setTextColor(ST77XX_RED);
-      tft.print(F("ERR"));
-    }
-    lastDrawnAvg = avg;
-  }
-
-  tft.setTextSize(1);
-
-  clearRow(ROW_HEATER, 12);
-  tft.setCursor(2, ROW_HEATER);
-  tft.setTextColor(ST77XX_RED);
-  if (TEMP_IS_VALID(sensorData.heaterTemp)) {
-    tft.printf("Heater:%.1fC %s", sensorData.heaterTemp, heaterOn ? "ON" : "OFF");
+  // Web address
+  canvas->fillRect(0, 0, W, 13, C_BAR);
+  canvas->setTextSize(1);
+  if (netStaConnected()) {
+    canvas->setTextColor(C_GREEN);
+    snprintf(buf, sizeof(buf), "http://%s", netStaIp().c_str());
   } else {
-    tft.print(F("Heater:ERR"));
+    canvas->setTextColor(C_YELLOW);
+    snprintf(buf, sizeof(buf), "AP http://%s", netApIp().c_str());
+  }
+  canvas->setCursor(4, 3);
+  canvas->print(buf);
+
+  // Average temperature
+  const float avg = sensorsAverage();
+  if (isnan(avg)) {
+    centered("--.-", 18, 3, C_RED);
+    centered("NO SENSOR", 46, 1, C_RED);
+  } else {
+    uint16_t color = C_TEXT;
+    if (avg <= settings.heatOn)      color = C_CYAN;
+    else if (avg >= settings.coolOn) color = C_ORANGE;
+    snprintf(buf, sizeof(buf), "%.1f%cC", avg, (char)248);
+    centered(buf, 18, 3, color);
+
+    // Per line: average and probe count
+    canvas->setTextSize(1);
+    for (int i = 0; i < 2; i++) {
+      const SensorLine& l = sensorLines[i];
+      if (isnan(l.avg)) snprintf(buf, sizeof(buf), "L%d --.- (%d)", i + 1, l.count);
+      else              snprintf(buf, sizeof(buf), "L%d %.1f (%d)", i + 1, l.avg, l.count);
+      canvas->setTextColor(isnan(l.avg) ? C_RED : C_DIM);
+      canvas->setCursor(i == 0 ? 4 : 84, 46);
+      canvas->print(buf);
+    }
   }
 
-  clearRow(ROW_HOURS, 12);
-  tft.setCursor(2, ROW_HOURS);
-  tft.setTextColor(ST77XX_RED);
-  tft.printf("Heating:%luh", stats.totalHeaterRuntime / 3600000UL);
+  // Relays
+  const char* heatDetail = ctrl.heaterMode == RELAY_AUTO ? "auto" : "manual";
+  const char* fr = fanReason();
+  const char* fanDetail = ctrl.fanMode != RELAY_AUTO ? "manual"
+                        : (fr[0] == 'c' ? "cooling" : fr[0] == 'r' ? "room heat" : "auto");
+  relayBox(4, "HEATING", ctrl.heater, C_HEAT, heatDetail);
+  relayBox(82, "FANS", ctrl.fan, C_FAN, fanDetail);
 
-  clearRow(ROW_FAN, 12);
-  tft.setCursor(2, ROW_FAN);
-  tft.setTextColor(ST77XX_GREEN);
-  tft.printf("Fan: %s  ", fansOn ? "ON" : "OFF");
-  tft.setTextColor(activeFault ? ST77XX_RED : ST77XX_YELLOW);
-  tft.print(modeName(currentMode));
+  // Setpoints and heating mode
+  canvas->setTextSize(1);
+  canvas->setTextColor(C_TEXT);
+  canvas->setCursor(4, 104);
+  canvas->printf("Heat<=%.1f  Fan>=%.1f", settings.heatOn, settings.coolOn);
+  canvas->setCursor(4, 116);
+  canvas->setTextColor(settings.roomHeating ? C_ORANGE : C_DIM);
+  canvas->print(settings.roomHeating ? "Room heating (+fans)" : "Zone heating");
 
-  // If a simulated value is armed, the little screen and the web page are
-  // reporting different temperatures. That has to be visible from the doorway,
-  // not only to whoever is holding the phone.
-  if (sim.airActive || sim.heaterActive) {
-    tft.setTextColor(ST77XX_MAGENTA);
-    tft.print(F(" SIM"));
+  push();
+}
+
+void displayMessage(const char* title, const char* line1, const char* line2, uint16_t color) {
+  if (!canvas) return;
+  canvas->fillScreen(C_BG);
+  centered(title, 30, 2, color);
+  centered(line1, 64, 1, C_TEXT);
+  centered(line2, 80, 1, C_TEXT);
+  push();
+}
+
+void displayOta(const char* msg, int percent) {
+  if (!canvas) return;
+  static int lastPercent = -2;
+  if (percent == lastPercent && percent >= 0) return;   // only repaint on change
+  lastPercent = percent;
+
+  canvas->fillScreen(C_BG);
+  centered("FIRMWARE UPDATE", 20, 1, C_YELLOW);
+  centered(msg, 40, 1, C_TEXT);
+  centered("do not power off", 112, 1, C_RED);
+  if (percent >= 0) {
+    canvas->drawRect(10, 64, W - 20, 14, C_TEXT);
+    canvas->fillRect(12, 66, (W - 24) * percent / 100, 10, C_GREEN);
+    char buf[8];
+    snprintf(buf, sizeof(buf), "%d%%", percent);
+    centered(buf, 86, 1, C_TEXT);
   }
-
-  clearRow(ROW_LEFT, 24);
-  tft.setTextColor(ST77XX_CYAN);
-  tft.setCursor(2, ROW_LEFT);
-  for (int i = 0; i < sensorData.numLeft; i++) {
-    if (TEMP_IS_VALID(sensorData.left[i])) tft.printf("%.1f ", sensorData.left[i]);
-    else                                   tft.print(F("-- "));
-  }
-  tft.setCursor(2, ROW_RIGHT);
-  for (int i = 0; i < sensorData.numRight; i++) {
-    if (TEMP_IS_VALID(sensorData.right[i])) tft.printf("%.1f ", sensorData.right[i]);
-    else                                    tft.print(F("-- "));
-  }
+  push();
 }
-
-void displayOtaBegin() {
-  tft.fillScreen(ST77XX_BLACK);
-  tft.setTextSize(1);
-  tft.setTextColor(ST77XX_YELLOW);
-  tft.setCursor(5, 20);
-  tft.print(F("FIRMWARE UPDATE"));
-  tft.setCursor(5, 35);
-  tft.setTextColor(ST77XX_RED);
-  tft.print(F("DO NOT POWER OFF"));
-
-  // The control loop stops running during an update, so the normal repaint
-  // path will not restore this screen - mark the chrome dirty for afterwards.
-  chromeDrawn = false;
-}
-
-void displayOtaProgress(size_t done, size_t total) {
-  static int lastShown = -1;
-
-  tft.setTextSize(1);
-  tft.fillRect(5, 60, SCREEN_W - 10, 12, ST77XX_BLACK);
-  tft.setCursor(5, 60);
-  tft.setTextColor(ST77XX_WHITE);
-
-  if (total == 0) {
-    // Browser upload: no Content-Length to divide by, so report raw progress.
-    const int kb = (int)(done / 1024);
-    if (kb == lastShown) return;
-    lastShown = kb;
-    tft.printf("%d KB received", kb);
-    return;
-  }
-
-  const int percent = (int)((done * 100) / total);
-  if (percent == lastShown) return;
-  lastShown = percent;
-
-  tft.printf("%d%%", percent);
-  tft.drawRect(5, 78, SCREEN_W - 10, 10, ST77XX_WHITE);
-  tft.fillRect(6, 79, ((SCREEN_W - 12) * percent) / 100, 8, ST77XX_GREEN);
-}
-
-void displayOtaResult(bool ok, const char* message) {
-  tft.fillScreen(ST77XX_BLACK);
-  tft.setTextSize(1);
-  tft.setTextColor(ok ? ST77XX_GREEN : ST77XX_RED);
-  tft.setCursor(5, 40);
-  tft.print(ok ? F("UPDATE OK") : F("UPDATE FAILED"));
-  tft.setCursor(5, 55);
-  tft.setTextColor(ST77XX_WHITE);
-  tft.print(message);
-  chromeDrawn = false;
-}
-
-// ----------------------------------------------------------------------------
-// FACTORY RESET
-// ----------------------------------------------------------------------------
-void displayHoldReset(int secondsLeft) {
-  tft.fillScreen(ST77XX_BLACK);
-  tft.setTextSize(1);
-  tft.setTextColor(ST77XX_YELLOW);
-  tft.setCursor(5, 20);
-  tft.print(F("FACTORY RESET"));
-
-  tft.setTextColor(ST77XX_WHITE);
-  tft.setCursor(5, 40);
-  tft.print(F("Release to cancel"));
-
-  tft.setTextSize(3);
-  tft.setTextColor(ST77XX_RED);
-  tft.setCursor(70, 65);
-  tft.print(secondsLeft);
-  tft.setTextSize(1);
-
-  chromeDrawn = false;
-}
-
-void displayResetDone(const char* apSsid, const char* uiPass) {
-  tft.fillScreen(ST77XX_BLACK);
-  tft.setTextSize(1);
-  tft.setTextColor(ST77XX_GREEN);
-  tft.setCursor(5, 30);
-  tft.print(F("RESET TO DEFAULTS"));
-  tft.setTextColor(ST77XX_WHITE);
-  tft.setCursor(5, 50);
-  tft.printf("AP:  %s", apSsid);
-  tft.setCursor(5, 62);
-  tft.printf("Web: %s", uiPass);
-  chromeDrawn = false;
-}
-
-void displayInvalidate() { chromeDrawn = false; }

@@ -3,37 +3,25 @@
 #include "config.h"
 
 // ============================================================================
-// TEMPERATURE SENSING (DS18B20 on three independent OneWire buses)
+// TEMPERATURE - two DS18B20 lines, any number of probes on each
 // ============================================================================
-// This module owns acquisition and validation only. It has no knowledge of
-// faults, relays or modes - it reports what it can see, and control.cpp
-// decides what that means. Invalid readings are reported as -127.0f.
+// Invalid values are NAN.
+//
+//   line average = mean of the valid probes on that line
+//   room average = mean of the line averages that are available
+//
+// So both lines weigh the same no matter how many probes each one carries.
 
-#define TEMP_INVALID -127.0f
-#define TEMP_IS_VALID(t) ((t) > -100.0f)
-
-struct SensorData {
-  float left[MAX_SENSORS_PER_SIDE]  = { TEMP_INVALID, TEMP_INVALID, TEMP_INVALID };
-  float right[MAX_SENSORS_PER_SIDE] = { TEMP_INVALID, TEMP_INVALID, TEMP_INVALID };
-  int numLeft = 0;
-  int numRight = 0;
-  float averageTemp = TEMP_INVALID;   // mean of every valid air sensor
-  float heaterTemp = TEMP_INVALID;    // heater zone, safety critical
-  bool heaterDetected = false;
+struct SensorLine {
+  uint8_t pin;
+  uint8_t count = 0;                     // probes found on the last scan
+  float temps[MAX_PROBES_PER_LINE];      // per probe, NAN if unreadable
+  float avg = NAN;                       // NAN once stale (SENSOR_STALE)
+  unsigned long lastValid = 0;
 };
 
-extern SensorData sensorData;
+extern SensorLine sensorLines[2];
 
 void sensorsBegin();
-
-// Both are conversion-pipelined: each call reads the conversion started by the
-// previous call and immediately starts the next one. At 12-bit resolution a
-// DS18B20 needs 750 ms, so reading straight after requesting - as this code
-// used to - returned the previous value anyway, but without acknowledging it.
-void readHeaterTemperature();
-void readAirTemperatures();
-
-// True once the respective sensors have been unreadable for longer than
-// SENSOR_FAILURE_GRACE_PERIOD. Brief glitches do not count.
-bool heaterSensorFailed();
-bool airSensorsFailed();
+void sensorsUpdate(unsigned long now);   // call every SENSOR_INTERVAL
+float sensorsAverage();                  // NAN if neither line has a reading
